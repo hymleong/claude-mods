@@ -24,3 +24,7 @@ Each plugin installs and updates on its own. Mods need a recent Claude Code buil
 
 - `Cache` keeps its data on your machine only (in Claude Code's plugin store). It does not send anything anywhere.
 - To update later: `claude plugin marketplace update claude-mods`, then `claude plugin update <name>@claude-mods`.
+
+## License
+
+MIT, see [LICENSE](LICENSE).
