@@ -1,0 +1,21 @@
+{
+  "name": "claude-mods",
+  "owner": {
+    "name": "hymle"
+  },
+  "plugins": [
+    {
+      "name": "status-hud",
+      "source": "./plugins/status-hud",
+      "description": "Activity, limits and context bar above the prompt."
+    },
+    {
+      "name": "Cache",
+      "source": "./plugins/Cache",
+      "description": "Status-line countdown of the 1 hour prompt-cache window."
+    }
+  ],
+  "metadata": {
+    "description": "Claude Code mods: a status HUD above the prompt and a prompt-cache countdown."
+  }
+}

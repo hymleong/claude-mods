@@ -1,0 +1,7 @@
+{
+  "name": "status-hud",
+  "version": "1.5.1",
+  "description": "A bar above the prompt showing current activity, 5-hour limit, weekly limit and context window.",
+  "author": { "name": "hymle" },
+  "types": "./types/index.d.ts"
+}
