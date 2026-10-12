@@ -9,7 +9,7 @@ import { gitTab } from './git'
 import type { Actions, Kit, Model } from './model'
 import { portsTab } from './ports'
 import { termTab } from './terminals'
-import { browserTabs, icon, mascot, pill, segments, tabPage, tone } from './ui'
+import { browserTabs, icon, mascot, moodPill, pill, segments, tabPage, tone } from './ui'
 
 export const TABS: readonly { id: Tab; label: string; hotkey: string; icon: IconName }[] = [
   { id: 'git', label: 'Git', hotkey: '1', icon: 'branch' },
@@ -73,7 +73,7 @@ export function header(kit: Kit, m: Model): RenderElement {
 
   return (
     <Box flexDirection="row" alignItems="center" columnGap={1}>
-      {mascot(kit, m, 32)}
+      {mascot(kit, m, m.mood, 128)}
       <Box flexDirection="column" flexShrink={1} minWidth={0}>
         <Text bold>Workbench</Text>
         <Box flexDirection="row" alignItems="center" columnGap={1}>
@@ -82,6 +82,9 @@ export function header(kit: Kit, m: Model): RenderElement {
           {at.branch !== '' && <Text color={tone(m, 'blue')}>{fit(at.branch, Math.floor(room / 2))}</Text>}
           {at.ahead > 0 && <Text color={tone(m, 'orange')}>{`${G.up}${at.ahead}`}</Text>}
           {at.behind > 0 && <Text color={tone(m, 'orange')}>{`${G.down}${at.behind}`}</Text>}
+        </Box>
+        <Box flexDirection="row" marginTop={0.5}>
+          {moodPill(kit, m, m.mood)}
         </Box>
       </Box>
       <Box flexGrow={1} />
@@ -169,7 +172,7 @@ export function band(kit: Kit, m: Model, act: Actions): RenderElement | undefine
 
   return (
     <Box flexDirection="row" alignItems="center" columnGap={1}>
-      {mascot(kit, m, 18)}
+      {mascot(kit, m, m.mood, 28)}
       {parts.map((part, at) => (
         <Box flexDirection="row" alignItems="center" columnGap={1}>
           {at > 0 && <Text dimColor>{G.dot}</Text>}

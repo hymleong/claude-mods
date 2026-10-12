@@ -1,18 +1,11 @@
 import type { RenderElement } from 'claude-code'
 
-import type { Block, Line, Script, Term } from '../../types'
-import type { Hue } from '../icons'
+import type { Script, Term } from '../../types'
 import { native, short } from '../paths'
-import { C, G, fit, plural, took } from './chrome'
+import { TERM, promptText, screenRows, screenSvg } from '../screen'
+import { C, fit, plural } from './chrome'
 import type { Actions, Kit, Model } from './model'
-import { action, card, emptyState, icon, iconPress, pill, row, section, tile, tone, toolbar } from './ui'
-
-/** Lines of output shown: the block opened whole, the latest command's tail, and older commands' tails. */
-const OPEN_LINES = 400
-const LAST_LINES = 80
-const OLD_LINES = 6
-/** Blocks shown below the session's header, the latest last. */
-const MAX_BLOCKS = 8
+import { action, card, emptyState, icon, section } from './ui'
 
 export function termTab(kit: Kit, m: Model, act: Actions): RenderElement {
   const { Box, Text } = kit
@@ -41,47 +34,8 @@ export function termTab(kit: Kit, m: Model, act: Actions): RenderElement {
 
   return (
     <Box flexDirection="column">
-      {sessions(kit, m, term, act)}
       {scriptsCard(kit, m, act)}
-      {sessionCard(kit, m, term, act)}
-      {blocks(kit, m, term, act)}
-      {inputLine(kit, m, term, act)}
-    </Box>
-  )
-}
-
-function stateOf(term: Term): { hue: Hue; word: string } {
-  if (term.state === 'busy') return { hue: 'green', word: 'Running' }
-  if (term.state === 'starting') return { hue: 'orange', word: 'Starting' }
-  if (term.state === 'ended') return { hue: 'red', word: 'Ended' }
-
-  return { hue: 'gray', word: 'Ready' }
-}
-
-/** The open sessions as a row of tabs, each with its state and the ports its processes listen on. */
-function sessions(kit: Kit, m: Model, active: Term, act: Actions): RenderElement {
-  const { Box, Button, Text } = kit
-
-  return (
-    <Box flexDirection="row" flexWrap="wrap" alignItems="center" columnGap={2} rowGap={0.5} {...(m.isGrid ? {} : { paddingX: 1 })}>
-      {m.terms.map(term => {
-        const state = stateOf(term)
-        const ports = m.ports.rows.filter(one => one.termId === term.id).map(one => `:${one.port}`)
-        const label = fit(term.title, 18)
-
-        return (
-          <Box flexDirection="row" alignItems="center" columnGap={0.5} flexShrink={0}>
-            {icon(kit, m, 'dot', state.hue, 9)}
-            {term.id === active.id ? (
-              <Button key={`term-${term.id}`} variant="primary" label={label} onPress={() => act.pickTerm(term.id)} />
-            ) : (
-              <Button key={`term-${term.id}`} plain dimColor label={label} onPress={() => act.pickTerm(term.id)} />
-            )}
-            {ports.length > 0 && <Text color={tone(m, 'blue')}>{ports.slice(0, 2).join(' ')}</Text>}
-          </Box>
-        )
-      })}
-      {action(kit, m, 'term-new', 'plus', 'New', () => act.newTerm())}
+      {terminalWindow(kit, m, term, act)}
     </Box>
   )
 }
@@ -119,176 +73,161 @@ function scriptsCard(kit: Kit, m: Model, act: Actions): RenderElement | false {
   )
 }
 
-/** Where the session is, what it is doing, and what can be done to it. */
-function sessionCard(kit: Kit, m: Model, term: Term, act: Actions): RenderElement {
-  const { Text } = kit
-  const state = stateOf(term)
-  const where = native(short(term.cwd, m.home, Math.max(12, m.width - 30)), m.isWindows)
+/** Rows of screen shown at most: older ones scroll away, as a terminal's scrollback does. */
+const SCROLLBACK = 400
 
-  return card(
-    kit,
-    m,
-    [
-      row(kit, m, {
-        key: `session-${term.id}`,
-        lead: tile(kit, m, 'terminal', state.hue === 'gray' ? 'indigo' : state.hue, 26),
-        title: where,
-        isBold: true,
-        sub: `${term.title}${term.pid > 0 ? ` · pid ${term.pid}` : ''}`,
-        trail: [pill(kit, m, state.word, state.hue, true)],
-      }),
-      term.note !== '' && <Text color={tone(m, term.state === 'ended' ? 'red' : 'orange')} wrap="wrap">{term.note}</Text>,
-      toolbar(kit, [
-        term.state === 'busy' && action(kit, m, `stop-${term.id}`, 'stop', 'Stop', () => act.stopTerm(term.id), 'red'),
-        term.state !== 'ended' && action(kit, m, `clear-${term.id}`, 'trash', 'Clear', () => act.clearTerm(term.id), 'gray'),
-        action(kit, m, `restart-${term.id}`, 'restart', 'Restart', () => act.restartTerm(term.id), term.state === 'ended' ? 'blue' : 'gray'),
-        action(kit, m, `close-${term.id}`, 'close', 'Close', () => act.closeTerm(term.id), 'gray'),
-      ]),
-    ],
-    { gap: 0.5 },
+/**
+ * The session as a terminal window, after Windows Terminal: a strip of tabs and
+ * the session's controls on top, then a black screen of every command after its
+ * prompt and what it printed, and the live prompt to type at.
+ */
+function terminalWindow(kit: Kit, m: Model, term: Term, act: Actions): RenderElement {
+  const { Box, Text } = kit
+  const cols = Math.max(40, m.width - 4)
+  const toNative = (path: string): string => native(path, m.isWindows)
+  const rows = screenRows(m.blocks, toNative, cols)
+
+  return (
+    <Box flexDirection="column" marginTop={0.5} backgroundColor={TERM.background} borderStyle="round" borderColor={TERM.edge}>
+      {tabStrip(kit, m, term, act)}
+      <Box flexDirection="column" paddingX={1} paddingTop={0.5} paddingBottom={0.75}>
+        {term.state === 'starting' && rows.length === 0 && <Text color={TERM.dim}>Starting PowerShell…</Text>}
+        {term.state === 'idle' && rows.length === 0 && (
+          <Text color={TERM.dim}>{`PowerShell${term.pid > 0 ? ` · pid ${term.pid}` : ''} · ${plural(m.terms.length, 'session')} open`}</Text>
+        )}
+        {rows.length > 0 && screen(kit, m, rows, cols)}
+        {term.note !== '' && (
+          <Text color={term.state === 'ended' ? TERM.red : TERM.yellow} wrap="wrap">
+            {term.note}
+          </Text>
+        )}
+        {inputLine(kit, m, term, act)}
+      </Box>
+    </Box>
   )
 }
 
-/** Output lines grouped by stream, so plain output keeps its columns and errors stand out. */
-function groups(lines: readonly Line[]): { tone: Line['tone']; lines: string[] }[] {
-  const out: { tone: Line['tone']; lines: string[] }[] = []
-  for (const line of lines) {
-    const last = out[out.length - 1]
-    if (last !== undefined && last.tone === line.tone) last.lines.push(line.text)
-    else out.push({ tone: line.tone, lines: [line.text] })
+/** The screen: one monospaced picture where pictures are drawn, coloured rows of text on a grid. */
+function screen(kit: Kit, m: Model, rows: ReturnType<typeof screenRows>, cols: number): RenderElement {
+  const { Box, Text } = kit
+  if (kit.Svg !== undefined && !m.isGrid) {
+    const drawn = screenSvg(rows, cols, SCROLLBACK)
+
+    return (
+      <Box flexDirection="column">
+        {drawn.hidden > 0 && <Text color={TERM.dim}>{`… ${plural(drawn.hidden, 'earlier line')} scrolled away`}</Text>}
+        <kit.Svg source={drawn.svg} alt="Terminal output" />
+      </Box>
+    )
   }
 
-  return out
+  return (
+    <Box flexDirection="column">
+      {rows.slice(-SCROLLBACK).map(row => (
+        <Box flexDirection="row">
+          {row.length === 0 ? <Text> </Text> : row.map(span => <Text color={span.color} italic={span.isItalic === true}>{span.text}</Text>)}
+        </Box>
+      ))}
+    </Box>
+  )
 }
 
-/** A block's lines without the blank ones PowerShell pads tables with at either end. */
-function trimmed(lines: readonly Line[]): Line[] {
-  let start = 0
-  let end = lines.length
-  while (start < end && lines[start]!.text.trim() === '') start += 1
-  while (end > start && lines[end - 1]!.text.trim() === '') end -= 1
+const TAB_DOT: Record<Term['state'], string> = { busy: TERM.green, starting: TERM.yellow, ended: TERM.red, idle: TERM.dim }
 
-  return lines.slice(start, end)
-}
+/** The sessions as tabs, the open one joined to the screen below it, then New and the session's controls. */
+function tabStrip(kit: Kit, m: Model, active: Term, act: Actions): RenderElement {
+  const { Box, Button, Text } = kit
+  const last = m.blocks[m.blocks.length - 1]
 
-function statusPill(kit: Kit, m: Model, block: Block): RenderElement {
-  const spent = took((block.endedAt || m.now) - block.startedAt)
-  if (block.state === 'running') return pill(kit, m, spent, 'green', true)
-  if (block.state === 'stopping') return pill(kit, m, 'Stopping', 'orange', true)
-  if (block.state === 'stopped') return pill(kit, m, `Stopped · ${spent}`, 'orange')
-  if (block.state === 'fail') return pill(kit, m, block.exit !== null && block.exit !== 0 ? `Exit ${block.exit} · ${spent}` : `Failed · ${spent}`, 'red')
+  return (
+    <Box flexDirection="row" alignItems="center" flexWrap="wrap" backgroundColor={TERM.chrome} paddingX={0.5} paddingTop={0.4} columnGap={0.5}>
+      {m.terms.map(term => {
+        const isActive = term.id === active.id
+        const ports = m.ports.rows.filter(one => one.termId === term.id).map(one => `:${one.port}`)
 
-  return pill(kit, m, `${G.ok} ${spent}`, 'green')
-}
-
-function blockView(kit: Kit, m: Model, block: Block, isLast: boolean, act: Actions): RenderElement {
-  const { Box, Text, Button, Code } = kit
-  const isOpen = m.blockOpen === block.id
-  const lines = trimmed(block.lines)
-  const room = isOpen ? OPEN_LINES : isLast ? LAST_LINES : OLD_LINES
-  const shown = lines.slice(-room)
-  const hidden = block.dropped + lines.length - shown.length
-  const isDone = block.state !== 'running' && block.state !== 'stopping'
-  const head = (
-    <Box flexDirection="row" alignItems="center" columnGap={1} paddingY={m.isGrid ? 0 : 0.25}>
-      {icon(kit, m, 'chevron', block.cmd === '' ? 'gray' : 'blue', 12)}
-      <Box flexShrink={1} minWidth={0} flexGrow={1}>
-        <Text bold wrap="truncate-end">
-          {block.cmd === '' ? 'PowerShell' : block.cmd}
-        </Text>
+        return (
+          <Box
+            flexDirection="row"
+            alignItems="center"
+            columnGap={0.75}
+            paddingX={1}
+            paddingY={0.2}
+            flexShrink={0}
+            backgroundColor={isActive ? TERM.background : TERM.chrome}
+            {...(isActive ? { borderStyle: 'round' as const, borderColor: TERM.background } : {})}
+          >
+            <Text color={TAB_DOT[term.state]}>{term.state === 'busy' ? '●' : '❯'}</Text>
+            <Button key={`term-${term.id}`} plain onPress={() => act.pickTerm(term.id)}>
+              <Text color={isActive ? TERM.white : TERM.dim} bold={isActive}>
+                {fit(term.title, 18)}
+              </Text>
+            </Button>
+            {ports.length > 0 && <Text color={TERM.cyan}>{ports.slice(0, 2).join(' ')}</Text>}
+            <Button key={`close-${term.id}`} plain onPress={() => act.closeTerm(term.id)}>
+              <Text color={TERM.dim}>×</Text>
+            </Button>
+          </Box>
+        )
+      })}
+      <Box paddingX={0.75}>
+        <Button key="term-new" plain onPress={() => act.newTerm()}>
+          <Text color={TERM.foreground}>+</Text>
+        </Button>
       </Box>
-      {isDone && m.width >= 52 && block.cmd !== '' && iconPress(kit, m, `again-${block.id}`, 'pencil', 'Edit', () => act.editAgain(block.cmd))}
-      {isDone && m.width >= 52 && lines.length > 0 && (
-        <Box flexDirection="row" alignItems="center" columnGap={0.5}>
-          {!m.isGrid && kit.Svg !== undefined && icon(kit, m, 'copy', 'gray', 13)}
-          <Button key={`copy-${block.id}`} plain dimColor label={m.isGrid ? G.dot : 'Copy'} onPress={press => act.copyBlock(block.id, press.surface)} />
-        </Box>
-      )}
-      {block.cmd !== '' && statusPill(kit, m, block)}
-    </Box>
-  )
-
-  return (
-    <Box flexDirection="column" marginTop={m.isGrid ? 1 : 0.5}>
-      {card(kit, m, [
-        head,
-        hidden > 0 && (
-          <Button key={`more-${block.id}`} plain dimColor onPress={() => act.openBlock(isOpen ? '' : block.id)}>
-            {isOpen ? `${G.open} ${plural(block.dropped, 'earlier line')} not kept · Show Less` : `${G.closed} ${plural(hidden, 'earlier line')}`}
-          </Button>
-        ),
-        ...groups(shown).map(group =>
-          group.tone === 'out' ? (
-            <Code source={group.lines.join('\n')} wrap="wrap" />
-          ) : (
-            <Box flexDirection="column">
-              {group.lines.map(line => (
-                <Text color={group.tone === 'err' ? tone(m, 'red') : undefined} dimColor={group.tone === 'info'} italic={group.tone === 'info'}>
-                  {line === '' ? ' ' : line}
-                </Text>
-              ))}
-            </Box>
-          ),
-        ),
-        block.state === 'running' && lines.length === 0 && <Text dimColor>Running…</Text>,
-      ])}
+      <Box flexGrow={1} />
+      <Box flexDirection="row" alignItems="center" columnGap={1.5} paddingX={0.75}>
+        {active.state === 'busy' && control(kit, `stop-${active.id}`, '■ Stop', TERM.red, () => act.stopTerm(active.id))}
+        {last !== undefined && last.lines.length > 0 && control(kit, `copy-${last.id}`, 'Copy', TERM.foreground, press => act.copyBlock(last.id, press))}
+        {active.state !== 'ended' && control(kit, `clear-${active.id}`, 'Clear', TERM.foreground, () => act.clearTerm(active.id))}
+        {control(kit, `restart-${active.id}`, 'Restart', active.state === 'ended' ? TERM.blue : TERM.foreground, () => act.restartTerm(active.id))}
+      </Box>
     </Box>
   )
 }
 
-function blocks(kit: Kit, m: Model, term: Term, act: Actions): RenderElement {
-  const { Box, Text } = kit
-  const list = m.blocks.slice(-MAX_BLOCKS)
-  const earlier = m.blocks.length - list.length
+/** A quiet word in the tab strip that does something to the session. */
+function control(kit: Kit, key: string, label: string, color: string, onPress: (surface: string) => void): RenderElement {
+  const { Button, Text } = kit
 
   return (
-    <Box flexDirection="column" marginTop={m.isGrid ? 0 : 0.5}>
-      {earlier > 0 && (
-        <Box {...(m.isGrid ? {} : { paddingX: 1 })}>
-          <Text dimColor>{`${plural(earlier, 'earlier command')} · Clear to drop them`}</Text>
-        </Box>
-      )}
-      {list.length === 0 && term.state !== 'ended' && (
-        <Box {...(m.isGrid ? {} : { paddingX: 1, marginTop: 0.5 })}>
-          <Text dimColor>{term.state === 'starting' ? 'Starting PowerShell…' : 'Ready. Type a command below.'}</Text>
-        </Box>
-      )}
-      {list.map((block, at) => blockView(kit, m, block, at === list.length - 1, act))}
-    </Box>
+    <Button key={key} plain onPress={press => onPress(press.surface)}>
+      <Text color={color} dimColor={color === TERM.foreground}>
+        {label}
+      </Text>
+    </Button>
   )
 }
 
 function inputLine(kit: Kit, m: Model, term: Term, act: Actions): RenderElement {
   const { Box, Text, Input } = kit
-  const prompt = `PS ${native(term.cwd, m.isWindows)}>`
+  const prompt = promptText(native(short(term.cwd, m.home, Math.max(12, m.width - 30)), m.isWindows))
   if (kit.termInput !== undefined) {
     return (
-      <Box flexDirection="column" marginTop={1}>
-        {card(kit, m, [
-          <Box paddingY={m.isGrid ? 0 : 0.25}>
-            {kit.termInput({
-              termId: term.id,
-              prompt,
-              isBusy: term.state === 'busy',
-              isEnded: term.state === 'ended',
-              history: [...m.termHistory].slice(-100),
-              completion: null,
-              fill: m.inputFill,
-              isProportional: !m.isGrid,
-              accent: tone(m, 'blue'),
-              bad: tone(m, 'red'),
-            })}
-          </Box>,
-        ])}
+      <Box flexDirection="column">
+        {kit.termInput({
+          termId: term.id,
+          prompt,
+          isBusy: term.state === 'busy',
+          isEnded: term.state === 'ended',
+          history: [...m.termHistory].slice(-100),
+          completion: null,
+          fill: m.inputFill,
+          paste: null,
+          isProportional: !m.isGrid,
+          accent: TERM.foreground,
+          ink: TERM.yellow,
+          bad: TERM.red,
+          hint: TERM.dim,
+        })}
       </Box>
     )
   }
   if (Input !== undefined) {
     return (
-      <Box flexDirection="column" marginTop={1}>
+      <Box flexDirection="column" marginTop={0.5}>
         <Input
           key={`line-${term.id}`}
-          label={G.prompt}
+          label={prompt}
           placeholder={term.state === 'busy' ? 'Running: stop it to type the next command' : 'A PowerShell command'}
           submitLabel="run"
           onSubmit={text => act.runLine(term.id, text)}

@@ -164,7 +164,14 @@ export type PortRow = {
 
 export type Ports = { rows: PortRow[]; at: number; note: string }
 
-export type Counts = { changed: number; running: number; ports: number }
+/**
+ * What the mascot is doing, after what Claude is doing: asleep when idle, thinking between
+ * steps, reading, at work on files, running a command, on the web, with helpers (subagents),
+ * compacting, waiting on the person, just done, or knocked over (stopped or failed).
+ */
+export type Mood = 'sleep' | 'think' | 'read' | 'work' | 'run' | 'web' | 'helpers' | 'compact' | 'wait' | 'done' | 'oops'
+
+export type Counts ={ changed: number; running: number; ports: number }
 
 declare module 'claude-code' {
   interface PluginState {
@@ -173,6 +180,8 @@ declare module 'claude-code' {
       tab: Tab
       /** The person's theme, light or dark: what the pictures are coloured for. */
       scheme: 'light' | 'dark'
+      /** What the mascot in the header is doing, after what Claude is doing. */
+      mood: Mood
       workspace: string
       counts: Counts
       repos: Repo[]

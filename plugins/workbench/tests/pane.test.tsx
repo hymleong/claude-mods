@@ -170,9 +170,13 @@ describe('pane', () => {
     expect(seen.runs.map(one => one.cmd)).toEqual(['npm run dev'])
     for (const surface of SURFACES) {
       const ui = await $.ui.mount({ ...PANE, surface })
-      expect(await ui.find({ type: 'Code', text: /VITE ready for npm run dev/ })).toBeDefined()
-      expect(await ui.find({ type: 'Text', text: /a warning on stderr/ })).toBeDefined()
-      expect(await ui.find({ type: 'Text', text: /npm run dev/ })).toBeDefined()
+      // The screen is one picture where pictures are drawn, coloured rows of text elsewhere.
+      const [screen] = await ui.findAll({ type: 'Svg' }).then(all => all.filter(one => one.props.alt === 'Terminal output'))
+      const shows = async (text: RegExp): Promise<boolean> =>
+        screen !== undefined ? text.test(String(screen.props.source).replace(/ /g, ' ')) :(await ui.find({ type: 'Text', text })) !== undefined
+      expect(await shows(/VITE ready for npm run dev/)).toBe(true)
+      expect(await shows(/a warning on stderr/)).toBe(true)
+      expect(await shows(/npm run dev/)).toBe(true)
       // The script's chip shows, and the session's tab is named after it.
       expect(await ui.find({ key: 'script-|npm|dev' })).toBeDefined()
       expect((await ui.findAll({ type: 'Button' })).some(one => /^term-[0-9a-f]{12}$/.test(one.key ?? ''))).toBe(true)

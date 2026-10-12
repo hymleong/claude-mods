@@ -8,6 +8,7 @@ import type {
   GitSection,
   History,
   Listing,
+  Mood,
   OpenCommit,
   OpenFile,
   OpenRun,
@@ -37,6 +38,8 @@ export type Model = {
   isGrid: boolean
   /** The person's theme: what the pictures are coloured for. */
   scheme: 'light' | 'dark'
+  /** What the mascot is doing, after what Claude is doing. */
+  mood: Mood
   /** Cells across, inside the padding. */
   width: number
   /** Rows of the room when docked, so the footer sits at the bottom; 0 inline. */

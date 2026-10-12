@@ -22,10 +22,17 @@ export type InputProps = {
   completion: Completion | null
   /** Text the pane asks to put on the line (a command to edit and run again), matched by `seq`. */
   fill: { seq: number; text: string } | null
+  /** The clipboard's text, read for a paste, to go in at the cursor; matched by `seq`. */
+  paste: { seq: number; text: string } | null
   /** Whether the surface sets type proportionally: spaces must then be kept by hand. */
   isProportional: boolean
+  /** The prompt's colour. */
   accent: string
+  /** The typed text's colour. */
+  ink: string
   bad: string
+  /** The colour of the quiet line under the prompt. */
+  hint: string
 }
 
 type Cycle = { items: string[]; index: number; start: number; length: number; base: string }
@@ -39,11 +46,16 @@ type State = {
   cycle: Cycle | null
   askedSeq: number
   fillSeq: number
+  pasteSeq: number
+  /** Whether the blinking cursor is in its off half. */
+  isBlinkOff: boolean
   hasKeys: boolean
   note: string
 }
 
 const EMPTY = bufferOf('')
+/** A terminal's cursor blink: half a second on, half off. */
+const BLINK_MS = 530
 
 /** The line with one completion put in for the word Tab was pressed on. */
 function complete(base: string, cycle: Pick<Cycle, 'start' | 'length'>, item: string): Buffer {
@@ -55,6 +67,8 @@ function complete(base: string, cycle: Pick<Cycle, 'start' | 'length'>, item: st
 // What each instance last set, kept here as well: keys can arrive faster than frames,
 // and each must edit what the one before it left, not what was last drawn.
 const latest = new WeakMap<object, State>()
+// The instances whose blink is going: started once each.
+const blinking = new WeakSet<object>()
 
 const Input: ClientModule<InputProps, State> = (props, surface) => {
   const put = (next: State): void => {
@@ -70,12 +84,20 @@ const Input: ClientModule<InputProps, State> = (props, surface) => {
     cycle: null,
     askedSeq: 0,
     fillSeq: props.fill?.seq ?? 0,
+    pasteSeq: props.paste?.seq ?? 0,
+    isBlinkOff: false,
     hasKeys: false,
     note: '',
   }
   // A fill from the pane replaces the line once.
   if (props.fill !== null && props.fill.seq !== state.fillSeq) {
     state = { ...state, buffer: bufferOf(props.fill.text, 0, props.fill.text.length), fillSeq: props.fill.seq, back: -1, cycle: null }
+    put(state)
+  }
+  // The clipboard's text, read for a paste, goes in at the cursor once.
+  if (props.paste !== null && props.paste.seq !== state.pasteSeq) {
+    const pasted = edit(state.buffer, { key: props.paste.text }, false) ?? state.buffer
+    state = { ...state, buffer: props.paste.text === '' ? state.buffer : pasted, pasteSeq: props.paste.seq, back: -1, cycle: null, isBlinkOff: false }
     put(state)
   }
   // The shell answered a Tab: the first match goes in, and Tab again walks the rest.
@@ -93,13 +115,29 @@ const Input: ClientModule<InputProps, State> = (props, surface) => {
 
   // Keys can come faster than frames: each one edits what the last one left, not what was last drawn.
   const now = (): State => latest.get(surface) ?? state
-  const set = (next: Partial<State>): void => put({ ...now(), hasKeys: true, note: '', ...next })
+  // Any key shows the cursor again, as a terminal does, before it goes on blinking.
+  const set = (next: Partial<State>): void => put({ ...now(), hasKeys: true, note: '', isBlinkOff: false, ...next })
+  if (!blinking.has(surface)) {
+    blinking.add(surface)
+    surface.every(BLINK_MS, () => {
+      const held = now()
+      if (held.hasKeys) put({ ...held, isBlinkOff: !held.isBlinkOff })
+    })
+  }
 
   surface.onKey(key => {
     const state = now()
     if (key.ctrl === true && key.key === 'c') {
       if (props.isBusy) surface.post({ type: 'stop', termId: props.termId })
       set({ buffer: EMPTY, back: -1, cycle: null })
+
+      return
+    }
+    // Paste: the clipboard is the hooks module's to read; it answers with the text in `paste`.
+    const isPaste = ((key.ctrl === true || key.meta === true) && key.key.toLowerCase() === 'v') || (key.shift === true && key.key === 'insert')
+    if (isPaste) {
+      surface.post({ type: 'paste', termId: props.termId, seq: Date.now() % 1_000_000_000 })
+      set({})
 
       return
     }
@@ -168,8 +206,9 @@ const Input: ClientModule<InputProps, State> = (props, surface) => {
 
   const line = state.buffer.lines[0] ?? ''
   const col = state.buffer.col
-  // A line wider than its room scrolls with the cursor.
-  const room = Math.max(10, (surface.columns > 0 ? surface.columns : 60) - 4)
+  // On a cell grid a line wider than its room scrolls with the cursor; set in proportional
+  // type, where a cell count says little, it wraps under the prompt as a terminal's does.
+  const room = props.isProportional ? Infinity : Math.max(10, (surface.columns > 0 ? surface.columns : 60) - props.prompt.length - 2)
   const left = col >= room ? col - room + 1 : 0
   const show = (text: string): string => (props.isProportional ? keepSpaces(text) : text)
   const before = show(line.slice(left, col))
@@ -198,15 +237,19 @@ const Input: ClientModule<InputProps, State> = (props, surface) => {
           {cycle.items.length > 12 && <Text dimColor>+{cycle.items.length - 12}</Text>}
         </Box>
       )}
-      <Box flexDirection="row">
-        <Text color={props.isEnded ? props.bad : props.accent} bold>
-          {'❯ '}
-        </Text>
-        <Text>{before}</Text>
-        {state.hasKeys ? <Text inverse>{show(under)}</Text> : <Text>{show(under)}</Text>}
-        <Text>{after}</Text>
+      <Box flexDirection="row" flexWrap="wrap">
+        <Text color={props.isEnded ? props.bad : props.accent}>{show(props.prompt)}</Text>
+        <Text color={props.ink}>{before}</Text>
+        {state.hasKeys && !props.isBusy && !state.isBlinkOff ? (
+          <Text inverse color={props.ink}>
+            {show(under)}
+          </Text>
+        ) : (
+          <Text color={props.ink}>{show(under)}</Text>
+        )}
+        <Text color={props.ink}>{after}</Text>
       </Box>
-      {hint !== '' && <Text dimColor>{hint}</Text>}
+      {hint !== '' && <Text color={props.hint}>{hint}</Text>}
     </Box>
   )
 }

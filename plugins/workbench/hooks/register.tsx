@@ -9,6 +9,7 @@ import type {
   GitSection,
   Hit,
   Listing,
+  Mood,
   OpenFile,
   PortRow,
   Ports,
@@ -58,6 +59,7 @@ import {
 } from './ports'
 import type { Listener, Proc } from './ports'
 import { TASK_FILES, detect, isProjectDir } from './scripts'
+import { DONE_MS, OOPS_MS, moodOfTool } from './mood'
 import { HOST_ENCODED, processScript } from './shell-host'
 import { FRESH, feed, partial } from './stream'
 import type { StreamEvent, StreamState } from './stream'
@@ -108,6 +110,7 @@ const TABS: readonly Tab[] = ['git', 'term', 'ports']
 const isOn = atom({ plugin: 'workbench', key: 'isOn' } as const, false)
 const tab = atom({ plugin: 'workbench', key: 'tab' } as const, 'git')
 const scheme = atom({ plugin: 'workbench', key: 'scheme' } as const, 'dark')
+const mood = atom({ plugin: 'workbench', key: 'mood' } as const, 'sleep')
 const workspace = atom({ plugin: 'workbench', key: 'workspace' } as const, '')
 const counts = atom({ plugin: 'workbench', key: 'counts' } as const, { changed: 0, running: 0, ports: 0 })
 const repos = atom({ plugin: 'workbench', key: 'repos' } as const, [])
@@ -248,6 +251,31 @@ const git = ($: Engine, cwd: string, args: readonly string[], timeoutMs = 20_000
 
 /** A read from a timer must never hold the index lock: the person's own git, or Claude's, would fail on it. */
 const peek = ($: Engine, cwd: string, args: readonly string[]): Promise<Ran> => git($, cwd, ['--no-optional-locks', ...args])
+
+/** The text on the person's clipboard, `''` when there is none or it cannot be read. */
+async function readClipboard($: Engine): Promise<string> {
+  if (isWindows) {
+    // The system PowerShell answers fast; a fresh one is the fallback.
+    const host = await systemHost($)
+    if (host !== undefined) {
+      const answer = await call($, host, '/eval', { script: '[string](Get-Clipboard -Raw) | ConvertTo-Json -Compress' }, 5_000)
+      if (answer.ok) {
+        try {
+          const text: unknown = JSON.parse(answer.text)
+          if (typeof text === 'string') return text
+        } catch {
+          // Fall through to a fresh PowerShell.
+        }
+      }
+    }
+
+    return (await exec($, ['powershell', '-NoProfile', '-NonInteractive', '-Command', 'Get-Clipboard -Raw'], undefined, 8_000)).out.replace(/\r?\n$/, '')
+  }
+  const isMac = home.startsWith('/Users/')
+  const argv = isMac ? ['pbpaste'] : (await $.env.get('WAYLAND_DISPLAY')) ? ['wl-paste', '--no-newline'] : ['xclip', '-selection', 'clipboard', '-o']
+
+  return (await exec($, argv, undefined, 5_000)).out
+}
 
 /** Opens a web address in the person's browser. */
 async function browse($: Engine, url: string): Promise<boolean> {
@@ -503,7 +531,7 @@ async function systemHost($: Engine): Promise<Live | undefined> {
 }
 
 async function send($: Engine, live: Live, blockId: string, cmd: string): Promise<void> {
-  const sent = await call($, live, '/run', { id: blockId, cmd, width: Math.max(60, Math.min(250, termColumns)) })
+  const sent = await call($, live, '/run', { id: blockId, cmd, width: Math.max(40, Math.min(250, termColumns)) })
   if (sent.ok) return
   const block = live.blocks.find(one => one.id === blockId)
   if (block !== undefined) {
@@ -721,6 +749,26 @@ async function runScript($: Engine, script: Script): Promise<void> {
     return
   }
   await newTerm($, { cwd: script.cwd, title: script.label, script: script.id, cmd: script.cmd })
+}
+
+// What the mascot follows: whether a turn runs, how many subagents are out, and the
+// looks of the tools running now, the latest last.
+let inTurn = false
+let helpers = 0
+const acting: Mood[] = []
+let settle: Timer | undefined
+
+/** The mascot's look for what is happening now: a question first, then helpers, then the latest tool. */
+function moodNow(): Mood {
+  if (acting.includes('wait')) return 'wait'
+  if (helpers > 0) return 'helpers'
+
+  return acting[acting.length - 1] ?? (inTurn ? 'think' : 'sleep')
+}
+
+/** Sets what the mascot is doing; writes only a change, so the header redraws once. */
+async function setMood($: Engine, next: Mood): Promise<void> {
+  if ((await read($, mood)) !== next) await update($, mood, () => next)
 }
 
 async function recount($: Engine): Promise<void> {
@@ -1542,6 +1590,7 @@ async function model($: Engine, width: number, rows: number, isFocused: boolean,
   return {
     isGrid,
     scheme: await read($, scheme),
+    mood: await read($, mood),
     width,
     rows,
     isFocused,
@@ -1636,6 +1685,69 @@ export const register: Register = (on, options) => {
   // DEV-ONLY, remove before release.
   on('tool.call', { tool: 'mcp__workbench__dev_reload' }, async () => ({ result: 'Reloaded the workbench mod.', text: 'Reloaded the workbench mod.' }))
 
+  // The mascot follows Claude: thinking through a turn, a look for each tool it calls,
+  // waiting while a call is put to the person, then done (or knocked over) and back to sleep.
+  on('turn.start', async ($, e, next) => {
+    inTurn = true
+    helpers = 0
+    acting.length = 0
+    settle?.cancel()
+    await setMood($, 'think')
+
+    return next(e)
+  })
+
+  on('turn.step', async function* ($, e, next) {
+    if (e.agentId === undefined && inTurn) await setMood($, moodNow())
+
+    return yield* next(e)
+  })
+
+  on('tool.call', async ($, e, next) => {
+    const look = moodOfTool(e.tool)
+    if (look === 'helpers') helpers += 1
+    else acting.push(look)
+    if (inTurn) await setMood($, moodNow())
+    try {
+      return await next(e)
+    } finally {
+      if (look === 'helpers') helpers = Math.max(0, helpers - 1)
+      else acting.splice(acting.lastIndexOf(look), 1)
+      if (inTurn) await setMood($, moodNow())
+    }
+  })
+
+  on('tool.check', async ($, e, next) => {
+    const verdict = await next(e)
+    if (e.tool_use_id !== undefined && verdict.decision === 'ask') await setMood($, 'wait')
+
+    return verdict
+  })
+
+  on('session.compact', async ($, e, next) => {
+    if (e.trigger === 'precompute' || e.agentId !== undefined) return next(e)
+    await setMood($, 'compact')
+    try {
+      return await next(e)
+    } finally {
+      await setMood($, inTurn ? moodNow() : 'sleep')
+    }
+  })
+
+  on('turn.complete', async ($, e, next) => {
+    if (e.agentId === undefined) {
+      inTurn = false
+      helpers = 0
+      acting.length = 0
+      const isOk = e.reason === 'answer' && !e.isAborted
+      await setMood($, isOk ? 'done' : 'oops')
+      settle?.cancel()
+      settle = $.clock.after(isOk ? DONE_MS : OOPS_MS, () => void setMood($, 'sleep'))
+    }
+
+    return next(e)
+  })
+
   on('session.end', async ($, e, next) => {
     for (const live of [...lives.values(), ...(system === undefined ? [] : [system])]) dismiss($, live)
 
@@ -1723,7 +1835,12 @@ export const register: Register = (on, options) => {
     else if (data.type === 'stop') void stopTerm($, id)
     else if (data.type === 'clear') void clearTerm($, id)
     else if (data.type === 'restart') void restartTerm($, id)
-    else if (data.type === 'complete') {
+    else if (data.type === 'paste') {
+      const seq = typeof data.seq === 'number' ? data.seq : 0
+      const text = await readClipboard($)
+      const drawn = inputDrawn.get(id)
+      if (drawn !== undefined) return { props: { ...drawn, paste: { seq, text } } }
+    } else if (data.type === 'complete') {
       const seq = typeof data.seq === 'number' ? data.seq : 0
       const cursor = typeof data.cursor === 'number' ? data.cursor : 0
       const found = await complete($, id, str(data.text), cursor)
@@ -1739,7 +1856,8 @@ export const register: Register = (on, options) => {
     const isGrid = e.surface === 'terminal'
     if (isGrid) hasGrid = true
     if (e.surface === 'desktop') isDesktopFocused = e.props.isFocused
-    termColumns = Math.max(40, e.props.bodyColumns - 4)
+    // As wide as the pane's terminal screen, so PowerShell's tables fit it.
+    termColumns = Math.max(40, e.props.bodyColumns - 6)
     const { Box, Text, Button, Code, Input, Svg } = $.ui.resolve(e) as Kit
     const { Client } = $.ui.resolve(e) as Partial<Elements['terminal']>
     const kit: Kit = {

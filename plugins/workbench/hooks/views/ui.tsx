@@ -1,7 +1,7 @@
 import type { Color, RenderElement } from 'claude-code'
 
 import { GLYPH, glyphSvg, hex, letterTileSvg, mascotSvg, pillSize, pillSvg, tileSvg } from '../icons'
-import type { Hue, IconName } from '../icons'
+import type { Hue, IconName, Mood } from '../icons'
 import type { Kit, Model } from './model'
 
 // The pane's look, after Apple's: grouped cards on a quiet tint, small
@@ -61,13 +61,65 @@ export function tile(kit: Kit, m: Look, name: IconName, hue: Hue, size = 22): Re
   return <kit.Text color={tone(m, hue)}>{GLYPH[name]}</kit.Text>
 }
 
-/** The workbench's otter, or a diamond where pictures are not drawn. */
-export function mascot(kit: Kit, m: Look, size = 30): RenderElement {
+const MOOD_WORDS: Record<Mood, string> = {
+  sleep: 'Workbench, asleep',
+  think: 'Workbench, thinking',
+  read: 'Workbench, reading',
+  work: 'Workbench, at work',
+  run: 'Workbench, running a command',
+  web: 'Workbench, searching the web',
+  helpers: 'Workbench, with helpers at work',
+  compact: 'Workbench, compacting',
+  wait: 'Workbench, waiting for you',
+  done: 'Workbench, done',
+  oops: 'Workbench, stopped',
+}
+const MOOD_GLYPHS: Record<Mood, [string, Hue]> = {
+  sleep: ['z', 'gray'],
+  think: ['…', 'gray'],
+  read: ['≡', 'blue'],
+  work: [GLYPH.hammer, 'yellow'],
+  run: ['›', 'green'],
+  web: ['○', 'teal'],
+  helpers: ['∴', 'purple'],
+  compact: ['▣', 'brown'],
+  wait: ['!', 'orange'],
+  done: ['✓', 'green'],
+  oops: ['✗', 'red'],
+}
+
+/** What the mood is called in the header, after what Claude is doing. */
+const MOOD_LABELS: Record<Mood, string> = {
+  sleep: 'Sleeping',
+  think: 'Thinking…',
+  read: 'Reading files',
+  work: 'Working',
+  run: 'Running a command',
+  web: 'Browsing the web',
+  helpers: 'Helpers at work',
+  compact: 'Compacting',
+  wait: 'Waiting for you',
+  done: 'Done!',
+  oops: 'Stopped',
+}
+
+/** The mood as a word in a pill tinted like the mood; the sleeping one is quiet. */
+export function moodPill(kit: Kit, m: Look, mood: Mood): RenderElement {
+  const [, hue] = MOOD_GLYPHS[mood]
+
+  return pill(kit, m, MOOD_LABELS[mood], hue, mood !== 'sleep')
+}
+
+/** The workbench's otter, animated for its mood; a glyph where pictures are not drawn. */
+export function mascot(kit: Kit, m: Look, mood: Mood, size = 30): RenderElement {
   if (pictures(kit, m) && kit.Svg !== undefined) {
-    return <kit.Svg source={mascotSvg(size)} alt="Workbench" width={size} height={size} />
+    // Keyed by mood so a new mood starts its animation afresh.
+    return <kit.Svg key={`mascot-${mood}`} source={mascotSvg(mood, size)} alt={MOOD_WORDS[mood]} width={size} height={size} />
   }
 
-  return <kit.Text color={tone(m, 'blue')}>{GLYPH.hammer}</kit.Text>
+  const [glyph, hue] = MOOD_GLYPHS[mood]
+
+  return <kit.Text color={tone(m, hue)}>{glyph}</kit.Text>
 }
 
 /** A rounded square with a letter: a changed file's status. */
