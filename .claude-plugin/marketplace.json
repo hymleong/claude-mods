@@ -13,11 +13,6 @@
       "name": "Cache",
       "source": "./plugins/Cache",
       "description": "Status-line countdown of the 1 hour prompt-cache window."
-    },
-    {
-      "name": "workbench",
-      "source": "./plugins/workbench",
-      "description": "A side pane for Git review, a file browser and the branch's GitHub pull request and Actions runs. Needs only git; no daemon or CLI to install."
     }
   ],
   "metadata": {
