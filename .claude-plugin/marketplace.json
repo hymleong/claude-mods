@@ -13,9 +13,14 @@
       "name": "Cache",
       "source": "./plugins/Cache",
       "description": "Status-line countdown of the 1 hour prompt-cache window."
+    },
+    {
+      "name": "workbench",
+      "source": "./plugins/workbench",
+      "description": "Side pane: Git review, real PowerShell terminals and a live monitor of localhost servers. Nothing else to install."
     }
   ],
   "metadata": {
-    "description": "Claude Code mods: a status HUD above the prompt and a prompt-cache countdown."
+    "description": "Claude Code mods: a status HUD above the prompt, a prompt-cache countdown and a Git / terminals / ports workbench."
   }
 }

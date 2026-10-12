@@ -1,0 +1,21 @@
+{
+  "name": "workbench",
+  "version": "0.1.0",
+  "description": "A side pane with Git review, real PowerShell terminals and a live monitor of the servers running on localhost. Nothing else to install.",
+  "author": { "name": "hymle" },
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "shell": {
+      "type": "string",
+      "title": "Shell",
+      "description": "The PowerShell to run in terminals: a path or a command name. Empty picks pwsh (PowerShell 7) and falls back to Windows PowerShell.",
+      "default": ""
+    },
+    "loadProfile": {
+      "type": "boolean",
+      "title": "Load PowerShell profile",
+      "description": "Run your $PROFILE in each new terminal, as a normal PowerShell window does.",
+      "default": false
+    }
+  }
+}
