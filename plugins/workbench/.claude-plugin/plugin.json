@@ -1,0 +1,22 @@
+{
+  "name": "workbench",
+  "version": "0.1.0",
+  "description": "A side pane for Git review, a file browser and the branch's GitHub pull request and Actions runs. Needs only git; no daemon or CLI to install.",
+  "author": { "name": "hymle" },
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "githubToken": {
+      "type": "string",
+      "title": "GitHub token",
+      "description": "Optional. A GitHub personal access token for private repositories, a higher rate limit and re-running failed Actions jobs. Leave empty for public repositories.",
+      "sensitive": true,
+      "default": ""
+    },
+    "openOnStart": {
+      "type": "boolean",
+      "title": "Open on start",
+      "description": "Open the Workbench pane when a session starts.",
+      "default": false
+    }
+  }
+}
