@@ -1,6 +1,8 @@
 import { describe, expect, test } from 'claude-code/testing'
 
 import { bufferOf, edit, textOf } from '../hooks/edit-buffer'
+import { isBlockArt, suggest } from '../hooks/terminal-input'
+import { tabName, typedTitle, unique } from '../hooks/tab-name'
 import { graphRowSvg, graphWidth } from '../hooks/icons'
 import { checksOf, diffArgs, fitHunks, layoutGraph, letterOf, parseLog, parseNameStatus, parseStatus, tail } from '../hooks/git'
 import { base, dir, isUnder, join, native, norm, rel, same } from '../hooks/paths'
@@ -21,8 +23,8 @@ import {
 } from '../hooks/ports'
 import type { Proc } from '../hooks/ports'
 import { detect, fromJustfile, fromMakefile, fromPackageJson, packageManager, runCommand } from '../hooks/scripts'
-import { HOST_SCRIPT, encodeCommand, processScript } from '../hooks/shell-host'
-import { FRESH, clean, feed, partial, readMark } from '../hooks/stream'
+import { HOST_BOOT, HOST_SCRIPT, encodeCommand, processScript } from '../hooks/shell-host'
+import { ANSI_COLORS, FRESH, ansiRuns, clean, feed, partial, readMark } from '../hooks/stream'
 
 describe('paths', () => {
   test('Windows and git spellings are one path', () => {
@@ -103,8 +105,10 @@ describe('shell host', () => {
     expect(String.fromCharCode(...codes)).toBe('dir ✓')
   })
 
-  test('the host script fits a Windows command line and has no JS backticks in it', () => {
-    expect(encodeCommand(HOST_SCRIPT).length).toBeLessThan(32_000)
+  test('the host script fits the environment, its bootstrap a command line, and has no JS backticks', () => {
+    // The script rides in an environment variable (32,767 characters at most), the bootstrap on the command line.
+    expect(HOST_SCRIPT.length).toBeLessThan(30_000)
+    expect(HOST_BOOT.length).toBeLessThan(1_000)
     expect(HOST_SCRIPT.includes('`')).toBe(false)
   })
 
@@ -345,5 +349,142 @@ describe('edit buffer', () => {
     expect(edit(line, { key: 'left', ctrl: true }, false)?.col).toBe(4)
     expect(textOf(edit(line, { key: 'backspace', ctrl: true }, false)!)).toBe('git ')
     expect(edit(line, { key: 'u', ctrl: true }, false)?.lines).toEqual([''])
+  })
+})
+
+describe('suggestions', () => {
+  test('the latest command that starts as the line does, ignoring case, finishes it', () => {
+    const history = ['npm install', 'git status', 'npm run dev', 'Get-ChildItem']
+    expect(suggest('n', history)).toBe('pm run dev')
+    expect(suggest('npm i', history)).toBe('nstall')
+    expect(suggest('GIT', history)).toBe(' status')
+    expect(suggest('get-c', history)).toBe('hildItem')
+  })
+
+  test('nothing for an empty line, no match, or a line already whole', () => {
+    const history = ['npm run dev']
+    expect(suggest('', history)).toBe('')
+    expect(suggest('   ', history)).toBe('')
+    expect(suggest('yarn', history)).toBe('')
+    expect(suggest('npm run dev', history)).toBe('')
+  })
+})
+
+describe('tab names', () => {
+  const name = (cmd: string): string => tabName(cmd).name
+
+  test('package scripts are named after the script', () => {
+    expect(name('npm run dev')).toBe('dev')
+    expect(name('npm run-script build')).toBe('build')
+    expect(name('npm start')).toBe('start')
+    expect(name('npm test')).toBe('test')
+    expect(name('pnpm dev')).toBe('dev')
+    expect(name('yarn dev')).toBe('dev')
+    expect(name('bun run dev')).toBe('dev')
+    expect(name('npm run dev -- --port 3000')).toBe('dev')
+    expect(name('npm install')).toBe('npm install')
+    expect(name('pnpm add react')).toBe('pnpm add')
+  })
+
+  test('npx and its kin are named after the tool, and its subcommand if it has one', () => {
+    expect(name('npx vite')).toBe('vite')
+    expect(name('npx expo start')).toBe('expo start')
+    expect(name('npx next dev')).toBe('next dev')
+    expect(name('npx serve dist')).toBe('serve')
+    expect(name('npx -y http-server -p 8080')).toBe('http-server')
+    expect(name('npx run start')).toBe('run start')
+    expect(name('npx create-vite@latest my-app')).toBe('create-vite')
+    expect(name('pnpm dlx vite')).toBe('vite')
+    expect(name('bunx vite')).toBe('vite')
+  })
+
+  test('interpreters are named after the file, a module, or the script\'s subcommand', () => {
+    expect(name('python app.py')).toBe('app.py')
+    expect(name('python -u src/app.py --port 5000')).toBe('app.py')
+    expect(name('python manage.py runserver')).toBe('runserver')
+    expect(name('python -m http.server 8000')).toBe('http.server')
+    expect(name('python script.py input.txt')).toBe('script.py')
+    expect(name('node server.js')).toBe('server.js')
+    expect(name(String.raw`node --watch src\server.js`)).toBe('server.js')
+    expect(name('php artisan serve')).toBe('serve')
+    expect(name('deno task dev')).toBe('dev')
+    expect(name('deno run -A main.ts')).toBe('main.ts')
+  })
+
+  test('other tools: with a known subcommand, else the program alone', () => {
+    expect(name('docker compose up')).toBe('compose up')
+    expect(name('docker-compose up -d')).toBe('compose up')
+    expect(name('cargo run')).toBe('cargo run')
+    expect(name('dotnet watch')).toBe('dotnet watch')
+    expect(name('go run .')).toBe('go run')
+    expect(name('flask run')).toBe('flask run')
+    expect(name('uvicorn main:app --reload')).toBe('uvicorn')
+    expect(name('ping -t 127.0.0.1')).toBe('ping')
+    expect(name(String.raw`C:\tools\ngrok.exe http 80`)).toBe('ngrok')
+    expect(name(String.raw`& "C:\Program Files\nodejs\node.exe" server.js`)).toBe('server.js')
+  })
+
+  test('a chain is named by its last command, a pipeline by its first, and a cd is kept', () => {
+    expect(tabName('cd client; npm run dev')).toEqual({ name: 'dev', cdTo: 'client' })
+    expect(tabName(String.raw`Set-Location .\api && npm start`)).toEqual({ name: 'start', cdTo: String.raw`.\api` })
+    expect(name('npm i && npm run dev')).toBe('dev')
+    expect(name('npm run dev | Tee-Object log.txt')).toBe('dev')
+  })
+
+  test('long names are cut, and clashes numbered', () => {
+    expect(name('npm run a-really-long-script-name-here').length).toBeLessThanOrEqual(18)
+    expect(unique('dev', ['pwsh 1'])).toBe('dev')
+    expect(unique('dev', ['dev'])).toBe('dev 2')
+    expect(unique('dev', ['dev', 'dev 2'])).toBe('dev 3')
+  })
+
+  test('the person names a tab with title or $Host.UI.RawUI.WindowTitle', () => {
+    expect(typedTitle('title frontend')).toBe('frontend')
+    expect(typedTitle('title "my server"')).toBe('my server')
+    expect(typedTitle('title')).toBe('')
+    expect(typedTitle('$Host.UI.RawUI.WindowTitle = "frontend"')).toBe('frontend')
+    expect(typedTitle("$host.ui.rawui.WindowTitle='api'")).toBe('api')
+    expect(typedTitle('Get-Title')).toBeUndefined()
+    expect(typedTitle('npm run dev')).toBeUndefined()
+  })
+})
+
+describe('colours', () => {
+  const E = String.fromCharCode(27)
+
+  test('a line without colour codes has no runs', () => {
+    expect(ansiRuns('plain text')).toBeUndefined()
+    expect(ansiRuns(`${E}[0mplain${E}[0m`)).toBeUndefined()
+  })
+
+  test('colour, bold, dim and underline become runs, in Windows Terminal colours', () => {
+    expect(ansiRuns(`${E}[90menv: load .env${E}[39m`)).toEqual([{ text: 'env: load .env', color: ANSI_COLORS[8] }])
+    expect(ansiRuns(`› Press ${E}[1ms${E}[22m ${E}[2m│${E}[22m switch`)).toEqual([
+      { text: '› Press ' },
+      { text: 's', isBold: true },
+      { text: ' ' },
+      { text: '│', isDim: true },
+      { text: ' switch' },
+    ])
+    expect(ansiRuns(`› Metro: ${E}[4mexp://192.168.0.38:8081${E}[24m`)).toEqual([{ text: '› Metro: ' }, { text: 'exp://192.168.0.38:8081', isUnderline: true }])
+    expect(ansiRuns(`${E}[31mred${E}[0m ${E}[92mgreen${E}[0m`)).toEqual([{ text: 'red', color: ANSI_COLORS[1] }, { text: ' ' }, { text: 'green', color: ANSI_COLORS[10] }])
+  })
+
+  test('256 and true colours, and a progress line keeps its last rewrite', () => {
+    expect(ansiRuns(`${E}[38;5;196mhot${E}[0m`)?.[0]?.color).toBe('#ff0000')
+    expect(ansiRuns(`${E}[38;2;18;52;86mrgb${E}[0m`)?.[0]?.color).toBe('#123456')
+    expect(ansiRuns(`${E}[33m10%\r${E}[32m100%${E}[0m`)).toEqual([{ text: '100%', color: ANSI_COLORS[2] }])
+  })
+
+  test('a coloured line reaches the screen with its runs, and plain text beside them', () => {
+    const fed = feed(FRESH, 'stdout', `${E}[33mwarn${E}[39m done\n`)
+    expect(fed.events).toEqual([{ kind: 'line', text: 'warn done', tone: 'out', runs: [{ text: 'warn', color: ANSI_COLORS[3] }, { text: ' done' }] }])
+  })
+
+  test('rows of block characters are pictures, as a QR code is', () => {
+    expect(isBlockArt([{ text: '█ ▄▄▄▄▄ █   █▄▀▀▄' }])).toBe(true)
+    expect(isBlockArt([{ text: '▄▄▄▄' }, { text: '▀▀' }])).toBe(true)
+    expect(isBlockArt([{ text: '› Scan the QR code' }])).toBe(false)
+    expect(isBlockArt([{ text: '    ' }])).toBe(false)
   })
 })

@@ -3,6 +3,7 @@ import type { Elements, EngineInterface, HookStream, ProcessSpawnChunk, ProcessS
 
 import type {
   Block,
+  Styled,
   BranchPull,
   Entry,
   GitFile,
@@ -60,8 +61,9 @@ import {
 import type { Listener, Proc } from './ports'
 import { TASK_FILES, detect, isProjectDir } from './scripts'
 import { DONE_MS, OOPS_MS, moodOfTool } from './mood'
-import { HOST_ENCODED, processScript } from './shell-host'
+import { HOST_BOOT, HOST_SCRIPT, processScript } from './shell-host'
 import { FRESH, feed, partial } from './stream'
+import { tabName, typedTitle, unique } from './tab-name'
 import type { StreamEvent, StreamState } from './stream'
 import type { InputProps } from './terminal-input'
 import { VIEW_LINES } from './views/files'
@@ -102,6 +104,8 @@ const MAX_EDIT_CHARS = 90_000
 const MAX_FOUND = 200
 const HISTORY_KEPT = 200
 const HISTORY_KEY = 'history'
+/** How long a command runs before its tab takes its name: long enough that ls and cd never rename one. */
+const RENAME_AFTER_MS = 2_000
 const SECTIONS: readonly GitSection[] = ['changes', 'files', 'history', 'pulls', 'actions']
 const TABS: readonly Tab[] = ['git', 'term', 'ports']
 
@@ -367,9 +371,10 @@ async function startHost($: Engine, live: Live, cwd: string): Promise<void> {
   }
   try {
     const stream = $.process.spawn({
-      argv: [exe, '-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', HOST_ENCODED],
+      argv: [exe, '-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', HOST_BOOT],
       cwd,
       env: {
+        WB_HOST: HOST_SCRIPT,
         WB_TOKEN: live.token,
         WB_CWD: cwd,
         WB_PROFILE: loadProfile && !live.isSystem ? '1' : '0',
@@ -415,8 +420,18 @@ function blockFor(live: Live): Block {
   return shell
 }
 
-function addLine(block: Block, text: string, tone: Block['lines'][number]['tone']): void {
-  block.lines.push({ text: text.length > MAX_LINE ? `${text.slice(0, MAX_LINE)}…` : text, tone })
+function addLine(block: Block, text: string, tone: Block['lines'][number]['tone'], runs?: Styled[]): void {
+  const plain = text.length > MAX_LINE ? `${text.slice(0, MAX_LINE)}…` : text
+  // Coloured runs are kept to the same length as the plain line.
+  let room = MAX_LINE
+  const kept = runs?.flatMap(run => {
+    if (room <= 0) return []
+    const piece = run.text.slice(0, room)
+    room -= piece.length
+
+    return [{ ...run, text: piece }]
+  })
+  block.lines.push(kept === undefined ? { text: plain, tone } : { text: plain, tone, runs: kept })
   if (block.lines.length > KEPT_LINES) {
     const cut = block.lines.length - KEPT_LINES
     block.lines.splice(0, cut)
@@ -448,7 +463,7 @@ function take($: Engine, live: Live, event: StreamEvent): void {
   if (event.kind === 'end') {
     const block = live.blocks.find(one => one.id === event.id)
     // What a progress line left unfinished is still output.
-    for (const left of partial(live.parse)) if (block !== undefined) addLine(block, left.text, left.tone)
+    for (const left of partial(live.parse)) if (block !== undefined) addLine(block, left.text, left.tone, left.runs)
     live.parse = FRESH
     if (block !== undefined) {
       block.state = event.state
@@ -468,7 +483,7 @@ function take($: Engine, live: Live, event: StreamEvent): void {
 
     return
   }
-  addLine(blockFor(live), event.text, event.tone)
+  addLine(blockFor(live), event.text, event.tone, event.runs)
 }
 
 async function setTerm($: Engine, id: string, change: (term: Term) => Term): Promise<void> {
@@ -599,6 +614,8 @@ async function runLine($: Engine, id: string, text: string): Promise<void> {
   const word = cmd.trim().toLowerCase()
   if (word === 'cls' || word === 'clear' || word === 'clear-host') return clearTerm($, id)
   if (word === 'exit') return closeTerm($, id)
+  const named = typedTitle(cmd)
+  if (named !== undefined) return renameTerm($, id, named, cmd)
   const term = (await read($, terms)).find(one => one.id === id)
   const live = lives.get(id)
   if (term === undefined) return
@@ -619,12 +636,71 @@ async function runLine($: Engine, id: string, text: string): Promise<void> {
   live.current = block.id
   await setTerm($, id, one => ({ ...one, state: 'busy' }))
   await flush($, live)
+  // Still running after a moment: a server, a watcher. The tab takes its name, as Windows Terminal's does.
+  $.clock.after(RENAME_AFTER_MS, () => {
+    if (live.current === block.id && !live.isEnded) void autoName($, id, cmd, term.cwd)
+  })
   if (live.port === 0) {
     live.pending = { id: block.id, cmd }
 
     return
   }
   await send($, live, block.id, cmd)
+}
+
+/**
+ * The folder a command ran in, as a tab names it: `client` when that is a folder inside
+ * the repository or the session's folder, `''` at their top or outside them.
+ */
+async function subfolder($: Engine, cwd: string, cdTo: string | undefined): Promise<string> {
+  if (cdTo !== undefined) {
+    const target = cdTo.replace(/[\\/]+$/, '')
+    return target === '' || target === '.' || target === '..' || target.startsWith('~') ? '' : base(target)
+  }
+  const roots = [...(await read($, repos)).map(one => one.root), await read($, workspace)].filter(root => root !== '' && isUnder(cwd, root))
+  const root = roots.sort((a, b) => b.length - a.length)[0]
+
+  return root === undefined || same(root, cwd) ? '' : base(cwd)
+}
+
+/** Names a tab after the command that keeps running in it, unless the person named it. */
+async function autoName($: Engine, id: string, cmd: string, cwd: string): Promise<void> {
+  const term = (await read($, terms)).find(one => one.id === id)
+  if (term === undefined || term.isNamed === true) return
+  const found = tabName(cmd)
+  if (found.name === '') return
+  const folder = await subfolder($, cwd, found.cdTo)
+  const wanted = folder === '' ? found.name : `${folder}: ${found.name}`
+  // A tab already called this keeps its name; another running the same thing is numbered.
+  if (term.title === wanted) return
+  const taken = (await read($, terms)).filter(one => one.id !== id).map(one => one.title)
+  const title = unique(wanted, taken)
+  await setTerm($, id, one => (one.isNamed === true ? one : { ...one, title }))
+}
+
+/**
+ * The person named the tab (`title frontend`, `$Host.UI.RawUI.WindowTitle = "frontend"`):
+ * it keeps that name. `title` alone hands naming back to the commands. Echoed on the
+ * screen as a command, as the shell would have shown it.
+ */
+async function renameTerm($: Engine, id: string, name: string, cmd: string): Promise<void> {
+  const term = (await read($, terms)).find(one => one.id === id)
+  if (term === undefined) return
+  await remember($, id, cmd)
+  const title = name.slice(0, 40)
+  if (title === '') {
+    const list = await read($, terms)
+    let n = 1
+    while (list.some(one => one.id !== id && one.title === `pwsh ${n}`)) n += 1
+    await setTerm($, id, one => ({ ...one, title: `pwsh ${n}`, isNamed: false }))
+  } else {
+    await setTerm($, id, one => ({ ...one, title, isNamed: true }))
+  }
+  const live = lives.get(id)
+  if (live === undefined) return
+  const now = Date.now()
+  live.blocks.push({ id: newId(), cmd, cwd: term.cwd, lines: [], dropped: 0, state: 'ok', exit: null, startedAt: now, endedAt: now })
+  await flush($, live)
 }
 
 async function stopTerm($: Engine, id: string): Promise<void> {
@@ -1835,6 +1911,11 @@ export const register: Register = (on, options) => {
     else if (data.type === 'stop') void stopTerm($, id)
     else if (data.type === 'clear') void clearTerm($, id)
     else if (data.type === 'restart') void restartTerm($, id)
+    else if (data.type === 'copy') {
+      // The line selected with ctrl+a, copied with ctrl+c, as in a PowerShell window.
+      const copied = await $.ui.copy({ text: str(data.text), surface: e.surface })
+      if (!copied.isCopied) toast($, 'This surface has no clipboard to copy to.', true)
+    }
     else if (data.type === 'paste') {
       const seq = typeof data.seq === 'number' ? data.seq : 0
       const text = await readClipboard($)
@@ -1874,7 +1955,8 @@ export const register: Register = (on, options) => {
             termInput: (props: InputProps) => {
               inputDrawn.set(props.termId, props)
 
-              return <Client key={`${INPUT}${props.termId}`} module="./terminal-input.tsx" props={props} />
+              // The whole screen, as wide as the window and down to its foot, so a click anywhere there takes the keys.
+              return <Client key={`${INPUT}${props.termId}`} module="./terminal-input.tsx" props={props} width="100%" flexGrow={1} />
             },
             editor: (props: EditorProps) => <Client key={EDITOR} module="./editor.tsx" props={props} />,
           }),

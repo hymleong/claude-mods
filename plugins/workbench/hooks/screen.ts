@@ -21,8 +21,8 @@ export const TERM = {
 } as const
 
 /** One run of text in one colour. */
-type Span = { text: string; color: string; isItalic?: boolean }
-type Row = Span[]
+export type Span = { text: string; color: string; isItalic?: boolean; isBold?: boolean; isDim?: boolean; isUnderline?: boolean }
+export type Row = Span[]
 
 const FONT = "'Cascadia Mono','Cascadia Code',Consolas,'SF Mono',Menlo,ui-monospace,monospace"
 const FONT_PX = 12.5
@@ -120,7 +120,18 @@ export function screenRows(blocks: readonly Block[], toNative: (path: string) =>
     }
     if (block.dropped > 0) rows.push([{ text: `… ${block.dropped} earlier lines not kept`, color: TERM.dim, isItalic: true }])
     for (const line of trimmed(block.lines)) {
-      rows.push(...wrapRow([{ text: line.text.replace(/\t/g, '    '), color: toneColor(line.tone), isItalic: line.tone === 'info' }], cols))
+      // In the colours the program gave it, where it gave any; else in its pipe's.
+      const spans: Row =
+        line.runs === undefined
+          ? [{ text: line.text.replace(/\t/g, '    '), color: toneColor(line.tone), isItalic: line.tone === 'info' }]
+          : line.runs.map(run => ({
+              text: run.text.replace(/\t/g, '    '),
+              color: run.color ?? toneColor(line.tone),
+              ...(run.isBold === true ? { isBold: true } : {}),
+              ...(run.isDim === true ? { isDim: true } : {}),
+              ...(run.isUnderline === true ? { isUnderline: true } : {}),
+            }))
+      rows.push(...wrapRow(spans, cols))
     }
     // As a terminal echoes it when a command is interrupted.
     if (block.state === 'stopped') rows.push([{ text: '^C', color: TERM.foreground }])
@@ -170,6 +181,25 @@ export function screenSvg(rows: readonly Row[], cols: number, maxRows: number): 
   ].join('')
 
   return { svg, width, height, rows: shown.length, hidden: rows.length - shown.length }
+}
+
+/**
+ * The last rows whose text fits `budget` characters and `maxRows` rows: what a surface
+ * module, bound to 100,000 characters a drawing, can be handed to draw as text.
+ */
+export function screenTail(rows: readonly Row[], maxRows: number, budget: number): { rows: Row[]; hidden: number } {
+  const shown: Row[] = []
+  let size = 0
+  for (let at = rows.length - 1; at >= 0 && shown.length < maxRows; at -= 1) {
+    const row = rows[at]!
+    // Each span costs its text and the frame around it as the drawing serializes it.
+    size += row.reduce((sum, span) => sum + span.text.length + 40, 40)
+    if (size > budget && shown.length > 0) break
+    shown.push(row)
+  }
+  shown.reverse()
+
+  return { rows: shown, hidden: rows.length - shown.length }
 }
 
 /** How many characters fit across `px` pixels of screen. */

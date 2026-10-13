@@ -109,10 +109,15 @@ export type Term = {
   /** The script this tab was opened to run, if any. */
   script: string
   note: string
+  /** The person named the tab (`title frontend`): commands that keep running no longer rename it. */
+  isNamed?: boolean
 }
 
 export type Tone = 'out' | 'err' | 'info'
-export type Line = { text: string; tone: Tone }
+/** A run of a line in one style, as the program's colour codes set it. */
+export type Styled = { text: string; color?: string; isBold?: boolean; isDim?: boolean; isUnderline?: boolean }
+/** One line of output; `runs` where the program coloured it, `text` the same line plain. */
+export type Line = { text: string; tone: Tone; runs?: Styled[] }
 
 export type BlockState = 'running' | 'stopping' | 'ok' | 'fail' | 'stopped'
 

@@ -11,6 +11,12 @@
 //
 // Every request carries the token the hooks module put in WB_TOKEN; the
 // variable is cleared at once so no command (or anything it starts) sees it.
+//
+// A pipe is no terminal, and Node programs that see none leave out what they
+// draw for one: Expo its QR code and key menu, chalk its colours. The host
+// writes a small preload to the temp folder and names it in NODE_OPTIONS, so
+// every Node program run here is told its output is a terminal as wide as the
+// pane's screen, and FORCE_COLOR asks for colour of every program that reads it.
 // Written to run under Windows PowerShell 5.1 as well as PowerShell 7.
 
 export const HOST_SCRIPT = String.raw`
@@ -25,6 +31,28 @@ $crlf = [string][char]13 + [char]10
 $mark = [string][char]30 + '[[wb:'
 function Out-Mark([string]$m) { [Console]::Out.WriteLine($mark + $m + ']]'); [Console]::Out.Flush() }
 function To-B64([string]$s) { [Convert]::ToBase64String($utf8.GetBytes($s)) }
+
+$tty = @'
+const readline = require('readline')
+const columns = Number(process.env.WB_COLUMNS) || 120
+for (const s of [process.stdout, process.stderr]) {
+  if (s.isTTY) continue
+  s.isTTY = true; s.columns = columns; s.rows = 40
+  s.getColorDepth = () => 8; s.hasColors = () => true; s.getWindowSize = () => [s.columns, s.rows]
+  s.cursorTo = (x, y, cb) => readline.cursorTo(s, x, y, cb)
+  s.moveCursor = (dx, dy, cb) => readline.moveCursor(s, dx, dy, cb)
+  s.clearLine = (d, cb) => readline.clearLine(s, d, cb)
+  s.clearScreenDown = cb => readline.clearScreenDown(s, cb)
+}
+if (!process.stdin.isTTY) { process.stdin.isTTY = true; process.stdin.isRaw = false; process.stdin.setRawMode = m => { process.stdin.isRaw = m; return process.stdin } }
+'@
+try {
+  $ttyFile = Join-Path ([IO.Path]::GetTempPath()) 'workbench-tty.cjs'
+  [IO.File]::WriteAllText($ttyFile, $tty)
+  $req = '--require "' + ($ttyFile -replace '\\', '/') + '"'
+  if (-not ([string]$env:NODE_OPTIONS).Contains($req)) { $env:NODE_OPTIONS = ($req + ' ' + $env:NODE_OPTIONS).Trim() }
+  $env:FORCE_COLOR = '1'
+} catch {}
 
 $rs = [runspacefactory]::CreateRunspace($Host)
 $rs.Open()
@@ -56,13 +84,47 @@ if ($args[1] -and (Test-Path -LiteralPath $args[1])) { . $args[1] | Out-Null }
 $WRAP = @'
 $global:LASTEXITCODE = 0
 $global:__wbFailed = $false
+# An error as PowerShell prints one for a command typed at its prompt. Where the record
+# points into this wrapper (Write-Error, a throw), the line it shows would be ours, not
+# the person's: those print as one line, "Name: message", as pwsh's concise view does.
+function global:__wbError($e) {
+  $inv = $e.InvocationInfo
+  if ($inv -ne $null -and [string]$inv.Line -like '*__wbCmd*') {
+    $name = ''
+    if ($inv.MyCommand -ne $null) { $name = [string]$inv.MyCommand.Name }
+    if (-not $name) { $name = [string]$e.CategoryInfo.Reason }
+    if ($name -eq 'WriteErrorException') { $name = 'Write-Error' }
+    $msg = [string]$e.Exception.Message
+    if ($e.ErrorDetails -ne $null -and $e.ErrorDetails.Message) { $msg = [string]$e.ErrorDetails.Message }
+    if ($name) { return $name + ': ' + $msg }
+    return $msg
+  }
+  return (($e | Out-String -Width $__wbWidth).TrimEnd())
+}
+# Run as typed, so Get-History, h and r know it, as at a PowerShell prompt.
+try { Add-History -InputObject ([pscustomobject]@{ CommandLine = $__wbCmd; ExecutionStatus = 'Completed'; StartExecutionTime = [datetime]::Now; EndExecutionTime = [datetime]::Now }) } catch {}
+# A line that does not parse is shown as PowerShell shows it, pointing at the fault.
+$__wbParse = $null
+[void][System.Management.Automation.Language.Parser]::ParseInput($__wbCmd, [ref]$null, [ref]$__wbParse)
+if ($__wbParse -and $__wbParse.Count -gt 0) {
+  $global:__wbFailed = $true
+  $f = $__wbParse[0]
+  $row = [Math]::Max(1, $f.Extent.StartLineNumber)
+  $src = [regex]::Split($__wbCmd, '\r?\n')
+  $text = ''
+  if ($row -le $src.Length) { $text = $src[$row - 1] }
+  $mark = (' ' * [Math]::Max(0, $f.Extent.StartColumnNumber - 1)) + ('~' * [Math]::Max(1, [Math]::Min(80, $f.Extent.Text.Length)))
+  [Console]::Error.WriteLine('ParserError: ' + [Environment]::NewLine + 'Line |' + [Environment]::NewLine + ('{0,4} |  {1}' -f $row, $text) + [Environment]::NewLine + '     |  ' + $mark + [Environment]::NewLine + '     | ' + $f.Message)
+  [Console]::Error.Flush()
+  return
+}
 try {
   . ([scriptblock]::Create($__wbCmd)) *>&1 | ForEach-Object {
     if ($_ -is [System.Management.Automation.ErrorRecord]) {
       if ([string]$_.FullyQualifiedErrorId -like 'NativeCommandError*') { [string]$_.Exception.Message }
       else {
         $global:__wbFailed = $true
-        [Console]::Error.WriteLine((($_ | Out-String -Width $__wbWidth).TrimEnd()))
+        [Console]::Error.WriteLine((__wbError $_))
         [Console]::Error.Flush()
       }
     }
@@ -74,7 +136,7 @@ try {
   } | Out-String -Stream -Width $__wbWidth | ForEach-Object { [Console]::Out.WriteLine($_); [Console]::Out.Flush() }
 } catch {
   $global:__wbFailed = $true
-  [Console]::Error.WriteLine((($_ | Out-String -Width $__wbWidth).TrimEnd()))
+  [Console]::Error.WriteLine((__wbError $_))
   [Console]::Error.Flush()
 }
 '@
@@ -86,12 +148,29 @@ $script:stopAt = $null
 $script:quit = $false
 $script:lastSeen = [DateTime]::UtcNow
 
+# Every process this shell started, and theirs, found from one snapshot before any is
+# ended: npx starts cmd starts node, and once the first is gone the rest no longer trace
+# back here. Ended deepest first, so nothing is left running without its parent.
 function Kill-Children {
   try {
     if ($isWin) {
-      Get-CimInstance Win32_Process -Filter "ParentProcessId=$PID" -ErrorAction Stop |
-        Where-Object { $_.Name -ne 'conhost.exe' } |
-        ForEach-Object { & taskkill.exe /T /F /PID $_.ProcessId 2>&1 | Out-Null }
+      $all = @(Get-CimInstance Win32_Process -Property ProcessId,ParentProcessId,Name -ErrorAction Stop)
+      $found = New-Object System.Collections.Generic.List[int]
+      $seen = New-Object System.Collections.Generic.HashSet[int]
+      [void]$seen.Add($PID)
+      $queue = New-Object System.Collections.Generic.Queue[int]
+      $queue.Enqueue($PID)
+      while ($queue.Count -gt 0) {
+        $parent = $queue.Dequeue()
+        foreach ($p in $all) {
+          $id = [int]$p.ProcessId
+          if ([int]$p.ParentProcessId -eq $parent -and $seen.Add($id)) {
+            if ($p.Name -ne 'conhost.exe') { $found.Add($id) }
+            $queue.Enqueue($id)
+          }
+        }
+      }
+      for ($i = $found.Count - 1; $i -ge 0; $i--) { try { Stop-Process -Id $found[$i] -Force -ErrorAction Stop } catch {} }
     } else { & pkill -TERM -P $PID 2>&1 | Out-Null }
   } catch {}
 }
@@ -180,6 +259,7 @@ function Serve($client) {
         if ($body.width) { $w = [Math]::Max(40, [Math]::Min(400, [int]$body.width)) }
         $rs.SessionStateProxy.SetVariable('__wbCmd', [string]$body.cmd)
         $rs.SessionStateProxy.SetVariable('__wbWidth', $w)
+        $env:WB_COLUMNS = [string]$w
         $p = [powershell]::Create(); $p.Runspace = $rs
         [void]$p.AddScript($WRAP)
         $script:ps = $p; $script:cmdId = $id; $script:stopAt = $null
@@ -189,7 +269,8 @@ function Serve($client) {
         return
       }
       '/stop' {
-        if ($busy) { [void]$script:ps.BeginStop($null, $null); $script:stopAt = [DateTime]::UtcNow }
+        # The programs first, while they still trace back here; then the pipeline.
+        if ($busy) { Kill-Children; [void]$script:ps.BeginStop($null, $null); $script:stopAt = [DateTime]::UtcNow }
         Send-Reply $ns 200 '{"ok":true}'
         return
       }
@@ -260,8 +341,13 @@ export function encodeCommand(script: string): string {
   return btoa(bytes)
 }
 
-/** The host script as the argument pwsh runs; encoded once. */
-export const HOST_ENCODED = encodeCommand(HOST_SCRIPT)
+/**
+ * What pwsh is given to run: a few words that take the host script from WB_HOST, clear
+ * the variable so no command sees it, and run it. The script itself rides in the
+ * environment, which holds 32,767 characters of it; encoded on the command line it
+ * would take nearly three times that, past what Windows lets a command line hold.
+ */
+export const HOST_BOOT = encodeCommand('$wbHost = $env:WB_HOST; $env:WB_HOST = $null; . ([scriptblock]::Create($wbHost))')
 
 /**
  * For the hidden host that answers the Ports view: every process's id, parent
