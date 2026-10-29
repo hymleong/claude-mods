@@ -1,12 +1,12 @@
 import type { RenderElement } from 'claude-code'
 
-import type { PortRow } from '../../types'
+import type { GonePort, PortRow } from '../../types'
 import { hex, portLook, sparklineSvg } from '../icons'
 import type { Hue } from '../icons'
 import { age, shown } from '../ports'
 import { G, ago, fit } from './chrome'
 import type { Actions, Kit, Model } from './model'
-import { action, card, detail, emptyState, icon, pill, row, segments, tile, tone, toolbar } from './ui'
+import { action, card, detail, emptyState, icon, pill, press, row, section, segments, tile, tone, toolbar } from './ui'
 
 /** A probe's verdict: answered, answered with an error, did not answer, or speaks no HTTP. */
 function health(row: PortRow): { hue: Hue; text: string } | undefined {
@@ -50,7 +50,7 @@ export function portsTab(kit: Kit, m: Model, act: Actions): RenderElement {
           <Text dimColor>Looking at what listens on this machine…</Text>
         </Box>
       )}
-      {m.ports.at > 0 && rows.length === 0 &&
+      {m.ports.at > 0 && rows.length === 0 && m.gone.length === 0 &&
         emptyState(
           kit,
           m,
@@ -60,6 +60,37 @@ export function portsTab(kit: Kit, m: Model, act: Actions): RenderElement {
           m.portFilter === 'dev' ? 'Start one from Terminals, or see All for everything that listens.' : '',
         )}
       {rows.length > 0 && <Box flexDirection="column">{card(kit, m, rows.map(one => portRow(kit, m, one, act)), { gap: 0.25 })}</Box>}
+      {m.gone.length > 0 && section(kit, m, 'Recently stopped', m.gone.length)}
+      {m.gone.length > 0 && card(kit, m, m.gone.map(one => goneRow(kit, m, one, act)), { gap: 0.25 })}
+    </Box>
+  )
+}
+
+/** A dev server that went away: when, what started it, and the ways to start it again or ask why. */
+function goneRow(kit: Kit, m: Model, one: GonePort, act: Actions): RenderElement {
+  const { Box, Text } = kit
+  const look = portLook(one.name, one.framework, 'dev')
+  const term = one.termId === '' ? undefined : m.terms.find(t => t.id === one.termId)
+  const sub = [`stopped ${ago(m.now, one.at)}`, one.cmd !== '' ? one.cmd : '', term !== undefined ? `in ${term.title}` : ''].filter(part => part !== '')
+
+  return (
+    <Box flexDirection="column">
+      {row(kit, m, {
+        key: `gone-${one.key}`,
+        lead: tile(kit, m, look.icon, 'gray', 26),
+        leadPx: 26,
+        title: [<Text bold dimColor>{`:${one.port}  `}</Text>, <Text dimColor>{one.framework !== '' ? one.framework : one.name}</Text>],
+        sub: fit(sub.join(` ${G.dot} `), Math.max(16, m.width - 26)),
+        trail: [press(kit, `gone-x-${one.key}`, '×', () => act.dismissGone(one.key))],
+      })}
+      {toolbar(
+        kit,
+        [
+          one.cmd !== '' && action(kit, m, `gone-restart-${one.key}`, 'restart', 'Start Again', () => act.restartGone(one.key), 'green'),
+          action(kit, m, `gone-why-${one.key}`, 'sparkle', 'Ask Claude Why', () => act.explainGone(one.key), 'purple'),
+        ],
+        0.25,
+      )}
     </Box>
   )
 }
@@ -141,6 +172,7 @@ function details(kit: Kit, m: Model, one: PortRow, act: Actions): RenderElement 
             </kit.Button>
           </Box>,
           term !== undefined && action(kit, m, `goterm-${one.key}`, 'terminal', `Show ${fit(term.title, 14)}`, () => act.pickTerm(term.id), 'blue'),
+          one.kind === 'dev' && action(kit, m, `ask-${one.key}`, 'sparkle', 'Ask Claude', () => act.askPort(one.key), 'purple'),
           canKill && !isKilling && action(kit, m, `kill-${one.key}`, 'xCircle', 'Stop Process', () => act.ask(`kill-${one.key}`), 'red'),
         ],
         0.5,

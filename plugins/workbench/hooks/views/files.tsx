@@ -1,10 +1,22 @@
 import type { RenderElement } from 'claude-code'
 
 import type { Listing, OpenFile } from '../../types'
-import { base, dir, isUnder, join, rel } from '../paths'
+import { base, dir, isUnder, join, rel, same } from '../paths'
 import { G, fit, fitStart, inView, plural } from './chrome'
 import type { Actions, Kit, Model } from './model'
 import { action, card, emptyState, icon, row, section, tile, tone, toolbar } from './ui'
+
+/** The mark on what Claude wrote this session: its sparkle, and a word where there is room. */
+export function claudeMark(kit: Kit, m: Model, label: string): RenderElement {
+  const { Box, Text } = kit
+
+  return (
+    <Box flexDirection="row" alignItems="center" columnGap={0.5}>
+      {icon(kit, m, 'sparkle', 'purple', 12)}
+      {m.width >= 50 && <Text color={tone(m, 'purple')}>{label}</Text>}
+    </Box>
+  )
+}
 
 /** Lines of a file shown at a time while reading it. */
 export const VIEW_LINES = 120
@@ -127,14 +139,18 @@ export function browser(kit: Kit, m: Model, act: Actions): RenderElement {
               isUnder(listing.path, root) &&
                 rel(listing.path, root) !== '' &&
                 row(kit, m, { key: 'dir-up', lead: icon(kit, m, 'back', 'gray', 14), title: '..', inline: true, onPress: () => act.openDir(dir(listing.path)) }),
-              ...listing.entries.slice(0, MAX_ENTRIES).map(entry =>
-                entry.isDir
+              ...listing.entries.slice(0, MAX_ENTRIES).map(entry => {
+                const at = join(listing.path, entry.name)
+                const byClaude = entry.isDir ? m.touched.filter(one => isUnder(one.path, at)).length : m.touched.some(one => same(one.path, at)) ? 1 : 0
+
+                return entry.isDir
                   ? row(kit, m, {
                       key: `dir:${entry.name}`,
                       lead: icon(kit, m, 'folder', 'blue', 14),
                       inline: true,
                       title: entry.name,
-                      onPress: () => act.openDir(join(listing.path, entry.name)),
+                      trail: [byClaude > 0 && claudeMark(kit, m, `${byClaude} by Claude`)],
+                      onPress: () => act.openDir(at),
                       chevron: 'right',
                     })
                   : row(kit, m, {
@@ -142,10 +158,10 @@ export function browser(kit: Kit, m: Model, act: Actions): RenderElement {
                       lead: icon(kit, m, 'doc', 'gray', 14),
                       inline: true,
                       title: fit(entry.name, Math.max(10, m.width - 18)),
-                      trail: [<Text dimColor>{sizeOf(entry.size)}</Text>],
-                      onPress: () => act.openFile(join(listing.path, entry.name)),
-                    }),
-              ),
+                      trail: [byClaude > 0 && claudeMark(kit, m, 'Claude'), <Text dimColor>{sizeOf(entry.size)}</Text>],
+                      onPress: () => act.openFile(at),
+                    })
+              }),
               listing.entries.length > MAX_ENTRIES && <Text dimColor>{`+${listing.entries.length - MAX_ENTRIES} more`}</Text>,
             ],
             { dense: true },

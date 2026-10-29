@@ -1,8 +1,11 @@
 import type { Elements, RenderElement } from 'claude-code'
 
 import type {
+  Activity,
   Block,
+  Branches,
   BranchPull,
+  GonePort,
   Counts,
   Diff,
   GitSection,
@@ -20,6 +23,7 @@ import type {
   Search,
   Tab,
   Term,
+  Touched,
 } from '../../types'
 import type { EditorProps } from '../editor'
 import type { InputProps } from '../terminal-input'
@@ -40,6 +44,9 @@ export type Model = {
   scheme: 'light' | 'dark'
   /** What the mascot is doing, after what Claude is doing. */
   mood: Mood
+  /** The latest turn, for the card beside the mascot; `null` before the first. */
+  activity: Activity | null
+  activityOpen: boolean
   /** Cells across, inside the padding. */
   width: number
   /** Rows of the room when docked, so the footer sits at the bottom; 0 inline. */
@@ -53,6 +60,8 @@ export type Model = {
   counts: Counts
   confirming: string
   busy: string
+  /** The drop-down open (`scripts`, `branches`); `''` for none. */
+  menu: string
 
   repos: readonly Repo[]
   repo: string
@@ -67,6 +76,10 @@ export type Model = {
   branchPull: BranchPull | null
   runs: Runs | null
   run: OpenRun | null
+  branches: Branches | null
+  /** Files Claude wrote this session, the latest first. */
+  touched: readonly Touched[]
+  claudeOnly: boolean
 
   terms: readonly Term[]
   activeTerm: string
@@ -79,6 +92,7 @@ export type Model = {
   ports: Ports
   portFilter: 'dev' | 'all'
   portOpen: string
+  gone: readonly GonePort[]
 }
 
 export type SyncVerb = 'fetch' | 'pull' | 'push'
@@ -87,6 +101,7 @@ export type SyncVerb = 'fetch' | 'pull' | 'push'
 export type Actions = {
   setTab: (tab: Tab) => void
   openPane: () => void
+  toggleActivity: () => void
 
   setGitSection: (section: GitSection) => void
   openRepo: (root: string) => void
@@ -116,6 +131,13 @@ export type Actions = {
   openUrl: (url: string) => void
   ask: (key: string) => void
   cancel: () => void
+  toggleMenu: (name: string) => void
+  showBranches: () => void
+  switchBranch: (root: string, name: string, isRemote: boolean) => void
+  createBranch: (root: string, name: string) => void
+  openWorktree: (path: string) => void
+  setClaudeOnly: (isOn: boolean) => void
+  undoClaude: (paths: readonly string[]) => void
 
   newTerm: () => void
   pickTerm: (id: string) => void
@@ -135,4 +157,8 @@ export type Actions = {
   copyUrl: (key: string, surface: string) => void
   killPort: (key: string) => void
   rescan: () => void
+  askPort: (key: string) => void
+  restartGone: (key: string) => void
+  explainGone: (key: string) => void
+  dismissGone: (key: string) => void
 }

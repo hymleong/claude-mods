@@ -1,10 +1,36 @@
 import { describe, expect, test } from 'claude-code/testing'
 
+import {
+  addSource,
+  cells,
+  charge,
+  checking,
+  effortName,
+  elapsed,
+  ending,
+  finish,
+  isPrompting,
+  ledger,
+  modelName,
+  prompting,
+  refusing,
+  setWorker,
+  settling,
+  sourceOf,
+  spendNow,
+  spendOfChunk,
+  spendOfLedger,
+  spendOfTool,
+  starting,
+  startTurn,
+  totals,
+} from '../hooks/activity'
 import { bufferOf, edit, textOf } from '../hooks/edit-buffer'
 import { isBlockArt, suggest } from '../hooks/terminal-input'
 import { tabName, typedTitle, unique } from '../hooks/tab-name'
 import { graphRowSvg, graphWidth } from '../hooks/icons'
-import { checksOf, diffArgs, fitHunks, layoutGraph, letterOf, parseLog, parseNameStatus, parseStatus, tail } from '../hooks/git'
+import { checksOf, diffArgs, fitHunks, isBranchName, layoutGraph, letterOf, parseBranches, parseLog, parseNameStatus, parseStatus, parseWorktrees, switchArgs, tail } from '../hooks/git'
+import { MAX_ORIGINALS_CHARS, findTouched, hash, touch, trimOriginals, writtenPath } from '../hooks/touched'
 import { base, dir, isUnder, join, native, norm, rel, same } from '../hooks/paths'
 import {
   classify,
@@ -486,5 +512,235 @@ describe('colours', () => {
     expect(isBlockArt([{ text: '▄▄▄▄' }, { text: '▀▀' }])).toBe(true)
     expect(isBlockArt([{ text: '› Scan the QR code' }])).toBe(false)
     expect(isBlockArt([{ text: '    ' }])).toBe(false)
+  })
+})
+
+describe('branches', () => {
+  test('local branches with their standing, then remote ones nobody tracks', () => {
+    const out = [
+      'refs/heads/main\torigin/main\tahead 2, behind 1\t2 hours ago\t*',
+      'refs/heads/feature\torigin/feature\t\t3 days ago\t ',
+      'refs/remotes/origin/HEAD\t\t\t2 hours ago\t ',
+      'refs/remotes/origin/main\t\t\t2 hours ago\t ',
+      'refs/remotes/origin/feature\t\t\t3 days ago\t ',
+      'refs/remotes/origin/spike\t\t\t1 week ago\t ',
+      '',
+    ].join('\n')
+    expect(parseBranches(out)).toEqual([
+      { name: 'main', upstream: 'origin/main', ahead: 2, behind: 1, when: '2 hours ago', isCurrent: true, isRemote: false },
+      { name: 'feature', upstream: 'origin/feature', ahead: 0, behind: 0, when: '3 days ago', isCurrent: false, isRemote: false },
+      { name: 'origin/spike', upstream: '', ahead: 0, behind: 0, when: '1 week ago', isCurrent: false, isRemote: true },
+    ])
+    expect(switchArgs({ name: 'origin/spike', isRemote: true })).toEqual(['switch', '--track', 'origin/spike'])
+    expect(switchArgs({ name: 'feature', isRemote: false })).toEqual(['switch', 'feature'])
+  })
+
+  test('worktrees: each folder and its branch, the bare one left out', () => {
+    const out = [
+      'worktree C:/work/app', 'HEAD abc', 'branch refs/heads/main', '',
+      'worktree C:\\work\\app-fix', 'HEAD def', 'branch refs/heads/fix/login', '',
+      'worktree C:/work/app-old', 'HEAD 123', 'detached', '',
+      'worktree C:/work/bare.git', 'bare', '',
+    ].join('\n')
+    expect(parseWorktrees(out, 'C:/work/app')).toEqual([
+      { path: 'C:/work/app', branch: 'main', isCurrent: true },
+      { path: 'C:/work/app-fix', branch: 'fix/login', isCurrent: false },
+      { path: 'C:/work/app-old', branch: '(detached)', isCurrent: false },
+    ])
+  })
+
+  test('branch names git would refuse', () => {
+    for (const ok of ['feature/login', 'fix-1.2', 'hym/try_this']) expect(isBranchName(ok)).toBe(true)
+    for (const bad of ['', '@', 'has space', 'a..b', '-x', 'x/', 'x.lock', 'a~1', 'a:b', 'a\\b', 'x//y', 'a@{1}']) expect(isBranchName(bad)).toBe(false)
+  })
+})
+
+describe('what Claude touched', () => {
+  test('the file each writing tool names, and none for the rest', () => {
+    expect(writtenPath('Edit', { file_path: 'C:\\work\\app\\a.ts' })).toBe('C:/work/app/a.ts')
+    expect(writtenPath('Write', { file_path: 'c:/work/app/b.ts' })).toBe('C:/work/app/b.ts')
+    expect(writtenPath('NotebookEdit', { notebook_path: '/x/n.ipynb' })).toBe('/x/n.ipynb')
+    expect(writtenPath('Read', { file_path: '/x/a.ts' })).toBe('')
+    expect(writtenPath('Edit', {})).toBe('')
+  })
+
+  test('the list keeps one entry a file, the latest first, counting edits', () => {
+    let list = touch([], 'C:/work/a.ts', 1, false, true)
+    list = touch(list, 'C:/work/b.ts', 2, true, true)
+    list = touch(list, 'c:/work/A.ts', 3, false, true)
+    expect(list.map(one => [one.path, one.edits, one.at])).toEqual([['C:/work/a.ts', 2, 3], ['C:/work/b.ts', 1, 2]])
+    expect(list[1]?.isNew).toBe(true)
+    expect(findTouched(list, 'C:\\work\\b.ts')?.edits).toBe(1)
+  })
+
+  test('fingerprints tell texts apart, and the oldest originals go first over budget', () => {
+    expect(hash('abc')).toBe(hash('abc'))
+    expect(hash('abc')).not.toBe(hash('abd'))
+    const big = 'x'.repeat(MAX_ORIGINALS_CHARS - 10)
+    const order = [touch([], '/new.ts', 2, false, true)[0]!, touch([], '/old.ts', 1, false, true)[0]!]
+    const kept = trimOriginals({ '/new.ts': { text: big }, '/old.ts': { text: 'y'.repeat(100) } }, order)
+    expect(Object.keys(kept)).toEqual(['/new.ts'])
+  })
+})
+
+describe('turn activity', () => {
+  test('each tool is a kind of work, and the latest call is what the time goes on', () => {
+    expect(spendOfTool('Grep')).toBe('search')
+    expect(spendOfTool('WebFetch')).toBe('search')
+    expect(spendOfTool('mcp__Claude_Browser__navigate')).toBe('search')
+    expect(spendOfTool('Read')).toBe('read')
+    expect(spendOfTool('PowerShell')).toBe('run')
+    expect(spendOfTool('Edit')).toBe('write')
+    expect(spendOfTool('Agent')).toBe('agents')
+    expect(spendOfTool('AskUserQuestion')).toBe('wait')
+    expect(spendOfTool('mcp__figma__use_figma')).toBe('other')
+    expect(spendNow([], false, undefined)).toBe('think')
+    expect(spendNow([{ spend: 'read', isStarted: true }, { spend: 'run', isStarted: true }], false, undefined)).toBe('run')
+  })
+
+  test('the person is waited on only while a dialog or a question is put to them, never over work', () => {
+    const reading = { spend: 'read' as const, isStarted: true }
+    const deciding = { spend: 'run' as const, isStarted: false }
+    // The auto-mode check on a call is that call's time, not the person's.
+    expect(spendNow([deciding], false, undefined)).toBe('run')
+    // A dialog is the person's time...
+    expect(spendNow([deciding], true, 'write')).toBe('wait')
+    // ...but a read that runs beside it is reading.
+    expect(spendNow([reading, deciding], true, undefined)).toBe('read')
+    // A question Claude asks is waiting too, unless other work runs.
+    expect(spendNow([{ spend: 'wait', isStarted: true }], false, undefined)).toBe('wait')
+    expect(spendNow([{ spend: 'wait', isStarted: true }, reading], false, undefined)).toBe('read')
+  })
+
+  test('the ledger: the auto-mode check counts as the time of its call, which then runs as the latest at work', () => {
+    const held = ledger()
+    expect(checking(held, 'c1', 'Bash', '')).toBe(true)
+    expect(checking(held, 'c1', 'Bash', '')).toBe(false)
+    expect(spendOfLedger(held, undefined)).toBe('run')
+    starting(held, 'c1', 'Bash', '')
+    expect(spendOfLedger(held, 'write')).toBe('run')
+    ending(held, 'c1')
+    expect(spendOfLedger(held, 'write')).toBe('write')
+  })
+
+  test('the ledger: a dialog waits on the person, a read beside it is reading, and a refusal ends it', () => {
+    const held = ledger()
+    checking(held, 'r1', 'Read', '')
+    checking(held, 'b1', 'Bash', '')
+    prompting(held, '', 'Bash')
+    expect(isPrompting(held)).toBe(true)
+    starting(held, 'r1', 'Read', '')
+    expect(spendOfLedger(held, undefined)).toBe('read')
+    ending(held, 'r1')
+    expect(spendOfLedger(held, undefined)).toBe('wait')
+    // The person refused: the loop asks its model again, and the call never ran.
+    settling(held, '')
+    expect(isPrompting(held)).toBe(false)
+    expect(spendOfLedger(held, undefined)).toBe('think')
+  })
+
+  test('the ledger: an answered dialog is over once its call runs, while a dialog in another loop stays up', () => {
+    const held = ledger()
+    checking(held, 'b1', 'Bash', '')
+    checking(held, 'b2', 'Bash', 'a1')
+    prompting(held, '', 'Bash')
+    prompting(held, 'a1', 'Bash')
+    starting(held, 'b1', 'Bash', '')
+    ending(held, 'b1')
+    expect(isPrompting(held)).toBe(true)
+    settling(held, 'a1')
+    expect(isPrompting(held)).toBe(false)
+    // A dialog no held call matches still counts, until its loop moves on or a call of it runs.
+    prompting(held, '', 'Write')
+    expect(isPrompting(held)).toBe(true)
+    starting(held, 'w1', 'Write', '')
+    expect(isPrompting(held)).toBe(false)
+  })
+
+  test('the ledger: the auto-mode check refusing a call drops it', () => {
+    const held = ledger()
+    checking(held, 'b1', 'Bash', '')
+    expect(refusing(held, 'b1')).toBe(true)
+    expect(refusing(held, 'b1')).toBe(false)
+    expect(spendOfLedger(held, undefined)).toBe('think')
+  })
+
+  test('between calls, the model is thinking or writing as its response streams', () => {
+    expect(spendOfChunk('thinking')).toBe('think')
+    expect(spendOfChunk('text')).toBe('write')
+    expect(spendOfChunk('tool')).toBe('write')
+    expect(spendOfChunk('input')).toBe('write')
+    expect(spendOfChunk('stop')).toBeUndefined()
+    expect(spendOfChunk('engine')).toBeUndefined()
+    expect(spendNow([], false, 'write')).toBe('write')
+    expect(spendNow([{ spend: 'read', isStarted: true }], false, 'write')).toBe('read')
+  })
+
+  test('what the time goes on now is dated from when it began, not from the last charge', () => {
+    let a = startTurn('t1', 0)
+    a = charge(a, 1_000, 'read')
+    a = charge(a, 1_500, 'read')
+    expect(a.since).toBe(1_000)
+    a = charge(a, 2_000, 'write')
+    expect(a.since).toBe(2_000)
+  })
+
+  test('the time is split as it passes, and the parts add up to the whole', () => {
+    let a = startTurn('t1', 1_000, 'claude-opus-5-5', 'high')
+    a = charge(a, 3_000, 'read')
+    a = charge(a, 4_500, 'run')
+    // The stretch still going counts, without being written down.
+    expect(totals(a, 5_000)).toMatchObject({ think: 2_000, read: 1_500, run: 500 })
+    expect(a.spent.run).toBe(0)
+    a = charge(a, 6_000, 'think')
+    a = finish(a, 7_000, true)
+    expect(a.spent).toEqual({ search: 0, read: 1_500, run: 1_500, write: 0, agents: 0, other: 0, wait: 0, think: 3_000 })
+    expect(Object.values(a.spent).reduce((all, one) => all + one, 0)).toBe(elapsed(a, 99_999))
+    expect(elapsed(a, 99_999)).toBe(6_000)
+    // Once over, nothing more is charged.
+    expect(charge(a, 9_000, 'run')).toBe(a)
+    expect(a.workers[0]).toMatchObject({ model: 'claude-opus-5-5', effort: 'high', doing: 'done', endedAt: 7_000 })
+  })
+
+  test('subagents join the card; a stopped turn stops them, a finished one leaves them running', () => {
+    let a = startTurn('t1', 0)
+    a = setWorker(a, 'a1', 100, { type: 'Explore', task: 'find the pet', model: 'claude-haiku-4-5-20251001' })
+    expect(a.workers.map(one => one.id)).toEqual(['', 'a1'])
+    expect(setWorker(a, 'a1', 200, { type: 'Explore' })).toBe(a)
+    a = setWorker(a, 'a1', 300, { doing: 'read' })
+    expect(a.workers[1]).toMatchObject({ doing: 'read', since: 300, startedAt: 100 })
+    expect(finish(a, 400, true).workers[1]?.endedAt).toBe(0)
+    expect(finish(a, 400, false).workers[1]).toMatchObject({ doing: 'stopped', endedAt: 400 })
+  })
+
+  test('models and efforts as people say them', () => {
+    expect(modelName('claude-opus-5-5')).toBe('Opus 5.5')
+    expect(modelName('claude-fable-5-1')).toBe('Fable 5.1')
+    expect(modelName('claude-haiku-4-5-20251001')).toBe('Haiku 4.5')
+    expect(modelName('claude-3-5-sonnet-20241022')).toBe('Sonnet 3.5')
+    expect(modelName('us.anthropic.claude-sonnet-4-5-20250929-v1:0')).toBe('Sonnet 4.5')
+    expect(modelName('claude-opus-4-1[1m]')).toBe('Opus 4.1')
+    expect(modelName('opus')).toBe('Opus')
+    expect(effortName('high')).toBe('High')
+    expect(effortName('xhigh')).toBe('X-High')
+    expect(effortName(undefined)).toBe('')
+  })
+
+  test('what a call looked at is a source, said once, the latest first', () => {
+    expect(sourceOf('Read', { file_path: 'C:\\work\\app\\package.json' })).toEqual({ kind: 'file', label: 'C:/work/app/package.json' })
+    expect(sourceOf('Grep', { pattern: 'mood' })).toEqual({ kind: 'search', label: 'mood' })
+    expect(sourceOf('WebFetch', { url: 'https://example.com', prompt: 'x' })).toEqual({ kind: 'web', label: 'https://example.com' })
+    expect(sourceOf('Edit', { file_path: 'C:/work/app/a.ts', old_string: 'a', new_string: 'b' })).toEqual({ kind: 'edit', label: 'C:/work/app/a.ts' })
+    expect(sourceOf('Bash', { command: 'ls' })).toBeUndefined()
+    expect(sourceOf('Read', { file_path: '' })).toBeUndefined()
+    const list = addSource(addSource(addSource([], { kind: 'file', label: 'a' }), { kind: 'file', label: 'b' }), { kind: 'file', label: 'a' })
+    expect(list.map(one => one.label)).toEqual(['a', 'b'])
+  })
+
+  test('a bar of cells is shared out by size, every cell given', () => {
+    expect(cells([1, 1, 2], 8)).toEqual([2, 2, 4])
+    expect(cells([1, 1, 1], 10).reduce((all, one) => all + one, 0)).toBe(10)
+    expect(cells([0, 0], 5)).toEqual([0, 0])
+    expect(cells([1, 999], 10)).toEqual([0, 10])
   })
 })

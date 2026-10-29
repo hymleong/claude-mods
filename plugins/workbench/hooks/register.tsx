@@ -2,11 +2,13 @@ import { atom, memberOf, read, update } from 'claude-code'
 import type { Elements, EngineInterface, HookStream, ProcessSpawnChunk, ProcessSpawnResult, Register, RenderSurface, Timer } from 'claude-code'
 
 import type {
+  Activity,
   Block,
   Styled,
   BranchPull,
   Entry,
   GitFile,
+  GonePort,
   GitSection,
   Hit,
   Listing,
@@ -19,21 +21,45 @@ import type {
   Runs,
   Script,
   Search,
+  Spend,
   Tab,
   Term,
 } from '../types'
+import {
+  addSource,
+  charge,
+  checking,
+  clearLedger,
+  ending,
+  finish,
+  isPrompting,
+  ledger,
+  prompting,
+  refusing,
+  setWorker,
+  settling,
+  sourceOf,
+  spendOfChunk,
+  spendOfLedger,
+  spendOfTool,
+  starting,
+  startTurn,
+} from './activity'
 import type { EditorProps } from './editor'
 import {
+  BRANCH_ARGS,
   LOG_ARGS,
   PULL_FIELDS,
   RUN_FIELDS,
   commitArgs,
   diffArgs,
   fitHunks,
+  isBranchName,
   isChanged,
   isSha,
   isStaged,
   moreLines,
+  parseBranches,
   parseCommit,
   parseJobs,
   parseLog,
@@ -42,10 +68,12 @@ import {
   parsePulls,
   parseRuns,
   parseStatus,
+  parseWorktrees,
   runPrompt,
+  switchArgs,
   tail,
 } from './git'
-import { base, dir, isUnder, join, norm, rel, same } from './paths'
+import { base, dir, isUnder, join, native, norm, rel, same } from './paths'
 import {
   isProbed,
   parseLsof,
@@ -64,6 +92,7 @@ import { DONE_MS, OOPS_MS, moodOfTool } from './mood'
 import { HOST_BOOT, HOST_SCRIPT, processScript } from './shell-host'
 import { FRESH, feed, partial } from './stream'
 import { tabName, typedTitle, unique } from './tab-name'
+import { MAX_ORIGINAL_CHARS, findTouched, hash, key as touchKey, touch, trimOriginals, writtenPath } from './touched'
 import type { StreamEvent, StreamState } from './stream'
 import type { InputProps } from './terminal-input'
 import { VIEW_LINES } from './views/files'
@@ -115,6 +144,8 @@ const isOn = atom({ plugin: 'workbench', key: 'isOn' } as const, false)
 const tab = atom({ plugin: 'workbench', key: 'tab' } as const, 'git')
 const scheme = atom({ plugin: 'workbench', key: 'scheme' } as const, 'dark')
 const mood = atom({ plugin: 'workbench', key: 'mood' } as const, 'sleep')
+const activity = atom({ plugin: 'workbench', key: 'activity' } as const, null)
+const activityOpen = atom({ plugin: 'workbench', key: 'activityOpen' } as const, false)
 const workspace = atom({ plugin: 'workbench', key: 'workspace' } as const, '')
 const counts = atom({ plugin: 'workbench', key: 'counts' } as const, { changed: 0, running: 0, ports: 0 })
 const repos = atom({ plugin: 'workbench', key: 'repos' } as const, [])
@@ -138,7 +169,13 @@ const termHistory = atom({ plugin: 'workbench', key: 'termHistory' } as const, [
 const blockOpen = atom({ plugin: 'workbench', key: 'blockOpen' } as const, '')
 const inputFill = atom({ plugin: 'workbench', key: 'inputFill' } as const, null)
 const scripts = atom({ plugin: 'workbench', key: 'scripts' } as const, [])
+const menu = atom({ plugin: 'workbench', key: 'menu' } as const, '')
+const touched = atom({ plugin: 'workbench', key: 'touched' } as const, [])
+const originals = atom({ plugin: 'workbench', key: 'originals' } as const, {})
+const claudeOnly = atom({ plugin: 'workbench', key: 'claudeOnly' } as const, false)
+const branches = atom({ plugin: 'workbench', key: 'branches' } as const, null)
 const ports = atom({ plugin: 'workbench', key: 'ports' } as const, { rows: [], at: 0, note: '' })
+const gone = atom({ plugin: 'workbench', key: 'gone' } as const, [])
 const portFilter = atom({ plugin: 'workbench', key: 'portFilter' } as const, 'dev')
 const portOpen = atom({ plugin: 'workbench', key: 'portOpen' } as const, '')
 const confirming = atom({ plugin: 'workbench', key: 'confirming' } as const, '')
@@ -394,7 +431,8 @@ async function startHost($: Engine, live: Live, cwd: string): Promise<void> {
       }
       live.settle(false)
       await endLive($, live, reason)
-    })()
+      // A host that ends with the module (a reload, a test's end) has no state left to write to.
+    })().catch(() => undefined)
   } catch (error) {
     live.settle(false)
     await endLive($, live, `PowerShell could not start: ${reasonOf(error)}`)
@@ -834,17 +872,76 @@ let helpers = 0
 const acting: Mood[] = []
 let settle: Timer | undefined
 
-/** The mascot's look for what is happening now: a question first, then helpers, then the latest tool. */
+/**
+ * The mascot's look for what is happening now: the person first, when a
+ * dialog or a question waits on them; then helpers; then the latest tool;
+ * else writing or thinking, as the model streams.
+ */
 function moodNow(): Mood {
-  if (acting.includes('wait')) return 'wait'
+  if (isPrompting(calls) || acting.includes('wait')) return 'wait'
   if (helpers > 0) return 'helpers'
 
-  return acting[acting.length - 1] ?? (inTurn ? 'think' : 'sleep')
+  return acting[acting.length - 1] ?? (inTurn ? (streaming === 'write' ? 'work' : 'think') : 'sleep')
 }
 
 /** Sets what the mascot is doing; writes only a change, so the header redraws once. */
 async function setMood($: Engine, next: Mood): Promise<void> {
   if ((await read($, mood)) !== next) await update($, mood, () => next)
+}
+
+// What the card beside the mascot follows: every loop's tool calls from their permission
+// check on, and the dialogs put to the person (`activity.ts` keeps the ledger); what the
+// main loop's model is streaming; and the model it ran on last.
+const calls = ledger()
+let callSeq = 0
+let streaming: Spend | undefined
+let lastModel = ''
+let lastEffort = ''
+let ticker: Timer | undefined
+const TICK_MS = 1_000
+const STALE_TURN_MS = 30 * 60_000
+
+/** Rewrites the latest turn's record, when there is one and the rewrite changes it. */
+async function track($: Engine, change: (held: Activity) => Activity): Promise<void> {
+  const held = await read($, activity)
+  if (held === null || change(held) === held) return
+  await update($, activity, now => (now === null ? now : change(now)))
+}
+
+/** The time since the last change goes to what was going on; what goes on now is worked out afresh. */
+async function recharge($: Engine): Promise<void> {
+  const at = await $.clock.now()
+  await track($, held => charge(held, at, spendOfLedger(calls, streaming)))
+}
+
+/** What a loop's model streams changed: the main loop's time and the mascot follow it, a subagent's row says it. */
+async function hearStream($: Engine, agentId: string | undefined, kind: Spend | undefined): Promise<void> {
+  if (agentId === undefined) {
+    streaming = kind
+    await recharge($)
+    if (inTurn) await setMood($, moodNow())
+
+    return
+  }
+  const at = await $.clock.now()
+  await track($, held => (held.workers.some(one => one.id === agentId && one.endedAt === 0) ? setWorker(held, agentId, at, { doing: kind ?? 'think' }) : held))
+}
+
+/** While a turn runs and the pane is on, its card's clock moves on each second. */
+function startTicker($: Engine): void {
+  ticker?.cancel()
+  ticker = $.clock.every(TICK_MS, () => {
+    void (async () => {
+      const held = await read($, activity)
+      if (held === null || held.outcome !== 'running') {
+        ticker?.cancel()
+        ticker = undefined
+
+        return
+      }
+      if (await read($, isOn)) await recharge($)
+    })().catch(() => undefined)
+  })
 }
 
 async function recount($: Engine): Promise<void> {
@@ -920,8 +1017,61 @@ async function loadPorts($: Engine, force: boolean): Promise<void> {
     const gone = [...known].filter(key => !now.has(key))
     if (up.length > 0) toast($, `Listening: ${up.map(row => `:${row.port} ${row.name}${row.framework === '' ? '' : ` (${row.framework})`}`).join(', ')}`)
     else if (gone.length > 0) toast($, `Stopped listening: ${gone.map(key => `:${key.split(':')[0]}`).join(', ')}`)
+    await rememberGone($, before.rows.filter(row => row.kind === 'dev' && gone.includes(`${row.port}:${row.name}`)), dev)
   }
   knownPorts = now
+}
+
+const GONE_KEEP_MS = 30 * 60_000
+const MAX_GONE = 6
+/** Ports a press stopped on purpose, so their going is no surprise. */
+const stoppedOnPurpose = new Set<number>()
+
+/** The command a terminal ran last, and where: what started the server it held, most likely. */
+function lastCommand(termId: string): { cmd: string; cwd: string; state: Block['state'] | '' } {
+  const live = lives.get(termId)
+  const block = live === undefined ? undefined : [...live.blocks].reverse().find(one => one.cmd.trim() !== '')
+
+  return block === undefined ? { cmd: '', cwd: '', state: '' } : { cmd: block.cmd, cwd: block.cwd, state: block.state }
+}
+
+/** Dev servers that stopped are kept a while, so one can be started again; one that is back is let go. */
+async function rememberGone($: Engine, stopped: readonly PortRow[], live: readonly PortRow[]): Promise<void> {
+  const back = new Set(live.map(row => row.port))
+  const at = Date.now()
+  const added: GonePort[] = stopped.map(row => {
+    const ran = row.termId === '' ? { cmd: '', cwd: '', state: '' as const } : lastCommand(row.termId)
+
+    return { key: `${row.port}:${at}`, port: row.port, name: row.name, framework: row.framework, termId: row.termId, cmd: ran.cmd, cwd: ran.cwd, at }
+  })
+  const held = await read($, gone)
+  const next = [...added, ...held.filter(one => !added.some(fresh => fresh.port === one.port))]
+    .filter(one => !back.has(one.port) && at - one.at < GONE_KEEP_MS)
+    .slice(0, MAX_GONE)
+  if (differs(held, next)) await update($, gone, () => next)
+  // A server that fell over on its own knocks the otter over too, while Claude is not at work.
+  const crashed = stopped.some(row => !stoppedOnPurpose.has(row.port) && row.termId !== '' && lastCommand(row.termId).state === 'fail')
+  for (const row of stopped) stoppedOnPurpose.delete(row.port)
+  if (crashed && !inTurn) {
+    await setMood($, 'oops')
+    settle?.cancel()
+    settle = $.clock.after(OOPS_MS, () => void setMood($, inTurn ? moodNow() : 'sleep').catch(() => undefined))
+  }
+}
+
+/** The tail of what a terminal printed, as plain text. */
+async function outputTail($: Engine, termId: string, lines = 60): Promise<string> {
+  const blocks = lives.get(termId)?.blocks ?? (await read($, memberOf(screen, { requestId: termId })))
+  const printed = blocks.flatMap(block => [...(block.cmd === '' ? [] : [`> ${block.cmd}`]), ...block.lines.map(line => line.text)])
+
+  return printed.slice(-lines).join('\n')
+}
+
+function serverPrompt(what: string, cmd: string, cwd: string, output: string): string {
+  const ran = cmd === '' ? '' : `It was started with \`${cmd}\`${cwd === '' ? '' : ` in ${cwd}`}.\n`
+  const shown = output.trim() === '' ? 'Its terminal printed nothing I can show.\n' : `The end of its terminal output:\n\n\`\`\`\n${output}\n\`\`\`\n`
+
+  return `${what}\n${ran}${shown}\nWhy, and how do I fix it?`
 }
 
 function refreshPorts($: Engine, force = false): Promise<void> {
@@ -942,6 +1092,7 @@ async function killPort($: Engine, key: string): Promise<void> {
   const row = (await read($, ports)).rows.find(one => one.key === key)
   await update($, confirming, () => '')
   if (row === undefined || row.kind === 'system' || row.pid <= 4) return
+  stoppedOnPurpose.add(row.port)
   const argv = isWindows ? ['taskkill', '/PID', String(row.pid), '/T', '/F'] : ['kill', '-TERM', String(row.pid)]
   const ran = await exec($, argv, undefined, 15_000)
   toast($, ran.code === 0 ? `Ended ${row.name} (pid ${row.pid}).` : `Could not end ${row.name}: ${tail(ran.err || ran.out, 2)}`, ran.code !== 0)
@@ -1010,6 +1161,7 @@ async function loadGit($: Engine): Promise<void> {
     const fresh = held === undefined ? null : await readDiff($, open.root, held, open.isStaged, Math.max(400, open.shown))
     if (differs(await read($, diff), fresh)) await update($, diff, () => fresh)
   }
+  await checkTouched($).catch(() => undefined)
   void refreshScripts($)
 }
 
@@ -1068,6 +1220,173 @@ async function readJobs($: Engine, root: string, id: number) {
   return ran.code === 0 ? parseJobs(ran.out) : []
 }
 
+async function loadBranches($: Engine, root: string): Promise<void> {
+  const [refs, trees] = await Promise.all([peek($, root, BRANCH_ARGS), peek($, root, ['worktree', 'list', '--porcelain'])])
+  const found = { root, items: parseBranches(refs.out).slice(0, 60), worktrees: parseWorktrees(trees.out, norm(root)) }
+  if (differs(await read($, branches), found)) await update($, branches, () => found)
+}
+
+/** After the checkout moved: what was read for the old branch is let go. */
+async function afterSwitch($: Engine): Promise<void> {
+  await update($, menu, () => '')
+  await update($, diff, () => null)
+  await update($, branchPull, () => null)
+  await update($, runs, () => null)
+  readAt.clear()
+  scriptsFor = ''
+  await refreshGit($)
+  await reloadExtras($)
+}
+
+async function switchBranch($: Engine, root: string, name: string, isRemote: boolean): Promise<void> {
+  await update($, busy, () => 'switching')
+  try {
+    const ran = await git($, root, switchArgs({ name, isRemote }), 60_000)
+    if (ran.code !== 0) {
+      toast($, tail(ran.err || ran.out, 4) || `git could not switch to ${name}.`, true)
+
+      return
+    }
+    toast($, `On ${isRemote ? name.slice(name.indexOf('/') + 1) : name}.`)
+  } finally {
+    await update($, busy, () => '')
+  }
+  await afterSwitch($)
+}
+
+async function createBranch($: Engine, root: string, given: string): Promise<void> {
+  const name = given.trim().replace(/\s+/g, '-')
+  if (!isBranchName(name)) {
+    toast($, `"${given.trim()}" cannot be a branch name.`, true)
+
+    return
+  }
+  const ran = await git($, root, ['switch', '-c', name], 30_000)
+  if (ran.code !== 0) {
+    toast($, tail(ran.err || ran.out, 3) || `git could not make ${name}.`, true)
+
+    return
+  }
+  toast($, `Made ${name} and switched to it.`)
+  await afterSwitch($)
+}
+
+// ── what Claude touched ─────────────────────────────────────────────────────
+
+/** Files whose time was last seen not as Claude left them: not read again until they change once more. */
+const seenAt = new Map<string, number>()
+
+/**
+ * Keeps the file as it is before Claude's first write to it this session.
+ * `kept`: kept now; `had`: kept before; `none`: too large or unreadable, so it cannot be put back.
+ */
+async function keepOriginal($: Engine, path: string): Promise<'kept' | 'had' | 'none'> {
+  const k = touchKey(path)
+  if ((await read($, originals))[k] !== undefined) return 'had'
+  const stat = await $.fs.stat(path).catch(() => undefined)
+  let text: string | null = null
+  if (stat !== undefined) {
+    if (stat.kind !== 'file' || stat.size > MAX_ORIGINAL_CHARS) return 'none'
+    const held = await $.fs.read(path).catch(() => undefined)
+    if (held === undefined || held.includes('\0')) return 'none'
+    text = held
+  }
+  await update($, originals, all => ({ ...all, [k]: { text, left: '', mtimeMs: 0 } }))
+
+  return 'kept'
+}
+
+/** After Claude wrote `path`: it joins the list, and how Claude left it is noted. */
+async function noteWrite($: Engine, path: string): Promise<void> {
+  const k = touchKey(path)
+  const text = await $.fs.read(path).catch(() => undefined)
+  const mtimeMs = await $.fs.stat(path).then(stat => stat.mtimeMs).catch(() => 0)
+  const original = (await read($, originals))[k]
+  const list = touch(await read($, touched), path, Date.now(), original?.text === null, original !== undefined)
+  await update($, touched, () => list)
+  seenAt.delete(k)
+  if (original !== undefined) {
+    await update($, originals, all => trimOriginals({ ...all, [k]: { ...original, left: text === undefined ? '' : hash(text), mtimeMs } }, list))
+  }
+}
+
+/** Whether each touched file is still as Claude left it: its time first, its text only when the time moved. */
+async function checkTouched($: Engine): Promise<void> {
+  const list = await read($, touched)
+  if (list.length === 0) return
+  const held = await read($, originals)
+  const next = await Promise.all(
+    list.map(async one => {
+      const k = touchKey(one.path)
+      const left = held[k]
+      if (left === undefined || left.left === '') return one
+      const mtimeMs = await $.fs.stat(one.path).then(stat => stat.mtimeMs).catch(() => -1)
+      if (mtimeMs === left.mtimeMs) return one.isAsLeft ? one : { ...one, isAsLeft: true }
+      if (seenAt.get(k) === mtimeMs) return one
+      seenAt.set(k, mtimeMs)
+      const text = mtimeMs < 0 ? undefined : await $.fs.read(one.path).catch(() => undefined)
+      const isAsLeft = text !== undefined && hash(text) === left.left
+
+      return isAsLeft === one.isAsLeft ? one : { ...one, isAsLeft }
+    }),
+  )
+  if (differs(list, next)) await update($, touched, () => next)
+}
+
+/** Around one of Claude's file writes: what the file held first, then that Claude wrote it. A refused or failed write leaves no trace. */
+async function followWrite<R extends { deny?: string; isError?: boolean }>($: Engine, path: string, write: () => Promise<R>): Promise<R> {
+  if (path === '') return write()
+  const kept = await keepOriginal($, path).catch(() => 'none' as const)
+  const result = await write()
+  if (result.deny !== undefined || result.isError === true) {
+    if (kept === 'kept' && findTouched(await read($, touched), path) === undefined) {
+      const k = touchKey(path)
+      await update($, originals, all => Object.fromEntries(Object.entries(all).filter(([one]) => one !== k)))
+    }
+
+    return result
+  }
+  await noteWrite($, path).catch(() => undefined)
+  void refreshGit($)
+
+  return result
+}
+
+/** Puts files back as they were before Claude's first write: the text, or no file where there was none. */
+async function undoClaude($: Engine, paths: readonly string[]): Promise<void> {
+  await update($, confirming, () => '')
+  const held = await read($, originals)
+  const done: string[] = []
+  const failed: string[] = []
+  for (const path of paths) {
+    const original = held[touchKey(path)]
+    if (original === undefined) {
+      failed.push(base(path))
+      continue
+    }
+    try {
+      if (original.text !== null) await $.fs.write(path, original.text)
+      else if (await $.fs.exists(path)) {
+        const argv = isWindows ? ['cmd', '/d', '/c', 'del', '/f', '/q', native(path, true)] : ['rm', '-f', '--', path]
+        const ran = await exec($, argv, undefined, 10_000)
+        if (ran.code !== 0 || (await $.fs.exists(path))) throw new Error(tail(ran.err || ran.out, 1) || 'could not delete it')
+      }
+      done.push(path)
+    } catch (error) {
+      failed.push(`${base(path)} (${reasonOf(error)})`)
+    }
+  }
+  if (done.length > 0) {
+    const keys = new Set(done.map(touchKey))
+    await update($, touched, list => list.filter(one => !keys.has(touchKey(one.path))))
+    await update($, originals, all => Object.fromEntries(Object.entries(all).filter(([k]) => !keys.has(k))))
+    await update($, diff, open => (open !== null && done.some(path => same(path, join(open.root, open.path))) ? null : open))
+  }
+  if (failed.length > 0) toast($, `Could not put back: ${failed.join(', ')}`, true)
+  else toast($, done.length === 1 ? `Put ${base(done[0] ?? '')} back as it was before Claude.` : `Put ${done.length} files back as they were before Claude.`)
+  await refreshGit($)
+}
+
 /** The reads only one view shows, for the view in front, no oftener than a minute apart. */
 async function loadExtras($: Engine, force: boolean): Promise<void> {
   if ((await read($, tab)) !== 'git') return
@@ -1088,6 +1407,7 @@ async function loadExtras($: Engine, force: boolean): Promise<void> {
     }
   }
   if (inView === undefined) return
+  if (part === 'changes' && (await read($, menu)) === 'branches' && isDue(`branches:${inView.root}`, force, 15_000)) await loadBranches($, inView.root)
   if (part === 'history' && isDue(`log:${inView.root}`, force, 15_000)) {
     const found = { root: inView.root, rows: parseLog((await peek($, inView.root, LOG_ARGS)).out) }
     if (differs(await read($, history), found)) await update($, history, () => found)
@@ -1357,11 +1677,16 @@ function actions($: Engine): Actions {
       }
       await update($, tab, () => id)
       await update($, confirming, () => '')
+      await update($, menu, () => '')
       if (id === 'ports') void refreshPorts($, true)
+      if (id === 'term') await refreshScripts($)
       await reloadExtras($)
     }),
     openPane: guard(async () => {
       await openPane($, true)
+    }),
+    toggleActivity: guard(async () => {
+      await update($, activityOpen, isOpen => !isOpen)
     }),
 
     setGitSection: guard(async (id: GitSection) => {
@@ -1591,6 +1916,37 @@ function actions($: Engine): Actions {
     cancel: guard(async () => {
       await update($, confirming, () => '')
     }),
+    toggleMenu: guard(async (name: string) => {
+      const isOpening = (await read($, menu)) !== name
+      await update($, menu, () => (isOpening ? name : ''))
+      if (!isOpening) return
+      if (name === 'branches') {
+        const inView = await inViewRepo($)
+        if (inView !== undefined) {
+          readAt.set(`branches:${inView.root}`, Date.now())
+          await loadBranches($, inView.root)
+        }
+      }
+      if (name === 'scripts') await refreshScripts($)
+    }),
+    showBranches: guard(async () => {
+      await update($, tab, () => 'git')
+      await update($, gitSection, () => 'changes')
+      await update($, diff, () => null)
+      await update($, menu, () => 'branches')
+      const inView = await inViewRepo($)
+      if (inView !== undefined) await loadBranches($, inView.root)
+    }),
+    switchBranch: guard(async (root: string, name: string, isRemote: boolean) => switchBranch($, root, name, isRemote)),
+    createBranch: guard(async (root: string, name: string) => createBranch($, root, name)),
+    openWorktree: guard(async (path: string) => {
+      await update($, menu, () => '')
+      await newTerm($, { cwd: path, title: base(path) })
+    }),
+    setClaudeOnly: guard(async (isOnly: boolean) => {
+      await update($, claudeOnly, () => isOnly)
+    }),
+    undoClaude: guard(async (paths: readonly string[]) => undoClaude($, paths)),
 
     newTerm: guard(async () => newTerm($)),
     pickTerm: guard(async (id: string) => {
@@ -1602,7 +1958,10 @@ function actions($: Engine): Actions {
     stopTerm: guard(async (id: string) => stopTerm($, id)),
     clearTerm: guard(async (id: string) => clearTerm($, id)),
     runLine: guard(async (id: string, text: string) => runLine($, id, text)),
-    runScript: guard(async (script: Script) => runScript($, script)),
+    runScript: guard(async (script: Script) => {
+      await update($, menu, () => '')
+      await runScript($, script)
+    }),
     openBlock: guard(async (id: string) => {
       openBlockId = id
       await update($, blockOpen, () => id)
@@ -1640,6 +1999,36 @@ function actions($: Engine): Actions {
     }),
     killPort: guard(async (key: string) => killPort($, key)),
     rescan: guard(async () => refreshPorts($, true)),
+    askPort: guard(async (key: string) => {
+      const row = (await read($, ports)).rows.find(one => one.key === key)
+      if (row === undefined) return
+      const ran = row.termId === '' ? { cmd: '', cwd: '' } : lastCommand(row.termId)
+      const answer = row.probe === null ? 'does not answer HTTP' : row.probe.status === 0 ? 'does not answer' : `answers ${row.probe.status}`
+      const what = `My dev server on http://localhost:${row.port}/ (${row.framework || row.name}) ${answer}.`
+      await draft($, serverPrompt(what, ran.cmd, ran.cwd, row.termId === '' ? '' : await outputTail($, row.termId)))
+    }),
+    restartGone: guard(async (key: string) => {
+      const held = (await read($, gone)).find(one => one.key === key)
+      if (held === undefined || held.cmd === '') return
+      await update($, gone, list => list.filter(one => one.key !== key))
+      const term = (await read($, terms)).find(one => one.id === held.termId)
+      if (term !== undefined && term.state === 'idle' && lives.has(term.id)) {
+        await update($, activeTerm, () => term.id)
+        await update($, tab, () => 'term')
+        await runLine($, term.id, held.cmd)
+      } else {
+        await newTerm($, { cmd: held.cmd, title: held.framework || held.name, ...(held.cwd === '' ? {} : { cwd: held.cwd }) })
+      }
+    }),
+    explainGone: guard(async (key: string) => {
+      const held = (await read($, gone)).find(one => one.key === key)
+      if (held === undefined) return
+      const what = `My dev server on port ${held.port} (${held.framework || held.name}) stopped.`
+      await draft($, serverPrompt(what, held.cmd, held.cwd, held.termId === '' ? '' : await outputTail($, held.termId)))
+    }),
+    dismissGone: guard(async (key: string) => {
+      await update($, gone, list => list.filter(one => one.key !== key))
+    }),
   }
 }
 
@@ -1667,17 +2056,21 @@ async function model($: Engine, width: number, rows: number, isFocused: boolean,
     isGrid,
     scheme: await read($, scheme),
     mood: await read($, mood),
+    activity: isPane ? await read($, activity) : null,
+    activityOpen: isPane ? await read($, activityOpen) : false,
     width,
     rows,
     isFocused,
     isWindows,
-    now: Date.now(),
+    // The engine's clock, as the turn card's times are: the same time as `Date.now()`, and the time a test moves.
+    now: await $.clock.now(),
     home,
     tab: shownTab,
     workspace: await read($, workspace),
     counts: await read($, counts),
     confirming: await read($, confirming),
     busy: isGit ? await read($, busy) : '',
+    menu: isGit || isTerm ? await read($, menu) : '',
     repos: await read($, repos),
     repo: await read($, repo),
     gitSection: section,
@@ -1691,6 +2084,9 @@ async function model($: Engine, width: number, rows: number, isFocused: boolean,
     branchPull: isGit && section === 'changes' ? await read($, branchPull) : null,
     runs: isGit && section === 'actions' ? await read($, runs) : null,
     run: isGit && section === 'actions' ? await read($, run) : null,
+    branches: isGit && section === 'changes' ? await read($, branches) : null,
+    touched: isGit && (section === 'changes' || section === 'files') ? await read($, touched) : [],
+    claudeOnly: isGit && section === 'changes' ? await read($, claudeOnly) : false,
     terms: termList,
     activeTerm: activeId,
     blocks: isTerm && activeId !== '' ? await read($, memberOf(screen, { requestId: activeId })) : [],
@@ -1701,6 +2097,7 @@ async function model($: Engine, width: number, rows: number, isFocused: boolean,
     ports: isPorts || isTerm || !isPane ? await read($, ports) : { rows: [], at: 0, note: '' },
     portFilter: isPorts ? await read($, portFilter) : 'dev',
     portOpen: isPorts ? await read($, portOpen) : '',
+    gone: isPorts ? await read($, gone) : [],
   }
 }
 
@@ -1739,6 +2136,9 @@ export const register: Register = (on, options) => {
     home = norm((isWindows ? profile : unixHome) ?? unixHome ?? profile ?? '')
     beat?.cancel()
     beat = $.clock.every(BEAT_EVERY_MS, () => heartbeat($))
+    // A reload mid-turn: the card's clock goes on. One left running long ago is let stand.
+    const latest = await read($, activity)
+    if (latest !== null && latest.outcome === 'running' && (await $.clock.now()) - latest.at < STALE_TURN_MS) startTicker($)
     // A reload ended every PowerShell this module held: their tabs say so and keep their output.
     const held = await read($, terms)
     if (held.some(one => one.state !== 'ended' && !lives.has(one.id))) {
@@ -1767,37 +2167,152 @@ export const register: Register = (on, options) => {
     inTurn = true
     helpers = 0
     acting.length = 0
+    clearLedger(calls)
+    streaming = undefined
     settle?.cancel()
+    // A new card for the turn, on the model the main loop ran on last until its first step says.
+    if (lastModel === '') lastModel = await $.session.model().catch(() => '')
+    const at = await $.clock.now()
+    await update($, activity, () => startTurn(e.turnId, at, lastModel, lastEffort))
+    startTicker($)
     await setMood($, 'think')
 
     return next(e)
   })
 
   on('turn.step', async function* ($, e, next) {
+    const at = await $.clock.now()
+    const effort = e.effort === undefined ? '' : String(e.effort)
+    // The loop asks its model again: a call it asked for and never ran was refused.
+    settling(calls, e.agentId ?? '')
+    if (e.agentId === undefined) {
+      lastModel = e.model
+      lastEffort = effort
+      // Until the response says otherwise, the model is thinking.
+      streaming = undefined
+      // A main-loop step of a turn this module never saw start (it reloaded mid-turn): the card takes it up from here.
+      const held = await read($, activity)
+      if (held === null || held.turnId !== e.turnId) {
+        inTurn = true
+        await update($, activity, () => startTurn(e.turnId, at, e.model, effort))
+        startTicker($)
+      }
+      await recharge($)
+    }
+    await track($, held => setWorker(held, e.agentId ?? '', at, { model: e.model, effort }))
     if (e.agentId === undefined && inTurn) await setMood($, moodNow())
+    // What the response streams says what its time goes on: thinking, or writing a reply or a call.
+    const stream = next(e)
+    let said: Spend | undefined
+    try {
+      for await (const chunk of stream) {
+        const kind = spendOfChunk(chunk.kind)
+        if (kind !== undefined && kind !== said) {
+          said = kind
+          await hearStream($, e.agentId, kind)
+        }
+        yield chunk
+      }
 
-    return yield* next(e)
+      return await stream.result
+    } finally {
+      if (said !== undefined) await hearStream($, e.agentId, undefined)
+    }
+  })
+
+  on('agent.spawn', async ($, e, next) => {
+    const started = await next(e)
+    const id = started.agentId
+    if (id !== undefined) {
+      const at = await $.clock.now()
+      await track($, held => setWorker(held, id, at, { type: e.subagentType, task: e.description, model: started.model, doing: 'think' }))
+    }
+
+    return started
   })
 
   on('tool.call', async ($, e, next) => {
     const look = moodOfTool(e.tool)
     if (look === 'helpers') helpers += 1
     else acting.push(look)
+    // The card: one more step, what it looked at, and the time from now on charged to it.
+    // It runs, so it moves to the end of the calls as the latest at work, and a dialog
+    // about it, if one was up, was answered.
+    const key = e.tool_use_id ?? `call-${(callSeq += 1)}`
+    const source = sourceOf(e.tool, e)
+    const agentId = e.agentId
+    const spend = spendOfTool(e.tool)
+    starting(calls, key, e.tool, agentId ?? '')
     if (inTurn) await setMood($, moodNow())
+    const at = await $.clock.now()
+    await track($, held => {
+      const counted = charge(
+        { ...held, steps: held.steps + 1, ...(source === undefined ? {} : { sources: addSource(held.sources, source) }) },
+        at,
+        spendOfLedger(calls, streaming),
+      )
+
+      return agentId === undefined ? counted : setWorker(counted, agentId, at, { doing: spend })
+    })
     try {
       return await next(e)
     } finally {
       if (look === 'helpers') helpers = Math.max(0, helpers - 1)
       else acting.splice(acting.lastIndexOf(look), 1)
+      ending(calls, key)
+      const end = await $.clock.now()
+      await track($, held => {
+        const charged = charge(held, end, spendOfLedger(calls, streaming))
+        const isAtWork = agentId !== undefined && held.workers.some(one => one.id === agentId && one.endedAt === 0)
+
+        return isAtWork ? setWorker(charged, agentId, end, { doing: 'think' }) : charged
+      })
       if (inTurn) await setMood($, moodNow())
     }
   })
 
+  // The files Claude writes: what each held first, so Changes can say which edits are
+  // Claude's and put a file back. A refused or failed write leaves no trace.
+  on('tool.call', { tool: 'Edit' }, async ($, e, next) => followWrite($, writtenPath(e.tool, e), () => next(e)))
+  on('tool.call', { tool: 'Write' }, async ($, e, next) => followWrite($, writtenPath(e.tool, e), () => next(e)))
+  on('tool.call', { tool: 'NotebookEdit' }, async ($, e, next) => followWrite($, writtenPath(e.tool, e), () => next(e)))
+
+  // A call the model made, from its permission check on. An `ask` goes to the mode's decider:
+  // the auto-mode check is the call's own time; a dialog, below, is the person's.
+  // Held from before the verdict, since the decider may be asked within the check itself.
   on('tool.check', async ($, e, next) => {
+    const id = e.tool_use_id
+    const isNew = id !== undefined && checking(calls, id, e.tool, e.agentId ?? '')
+    if (isNew) await recharge($)
     const verdict = await next(e)
-    if (e.tool_use_id !== undefined && verdict.decision === 'ask') await setMood($, 'wait')
+    if (isNew && verdict.decision === 'deny' && refusing(calls, id)) await recharge($)
 
     return verdict
+  })
+
+  // A permission dialog is about to be put to the person (no hook answered it): until its
+  // call runs, or its loop moves on after a refusal, the time is theirs and the otter waits.
+  on('classic.PermissionRequest', async ($, e, next) => {
+    const answer = await next(e)
+    if (answer.decision !== undefined) return answer
+    const loop = e.agent_id ?? ''
+    prompting(calls, loop, e.tool_name)
+    if (e.agent_id !== undefined) {
+      const id = e.agent_id
+      const at = await $.clock.now()
+      await track($, held => (held.workers.some(one => one.id === id && one.endedAt === 0) ? setWorker(held, id, at, { doing: 'wait' }) : held))
+    }
+    await recharge($)
+    await setMood($, moodNow())
+
+    return answer
+  })
+
+  // The auto-mode check refused a call: it never runs.
+  on('classic.PermissionDenied', async ($, e, next) => {
+    if (refusing(calls, e.tool_use_id)) await recharge($)
+
+    return next(e)
   })
 
   on('session.compact', async ($, e, next) => {
@@ -1811,14 +2326,27 @@ export const register: Register = (on, options) => {
   })
 
   on('turn.complete', async ($, e, next) => {
+    const at = await $.clock.now()
     if (e.agentId === undefined) {
       inTurn = false
       helpers = 0
       acting.length = 0
       const isOk = e.reason === 'answer' && !e.isAborted
+      await track($, held => (held.turnId === e.turnId && held.outcome === 'running' ? finish(held, at, isOk) : held))
+      clearLedger(calls)
+      streaming = undefined
+      ticker?.cancel()
+      ticker = undefined
       await setMood($, isOk ? 'done' : 'oops')
       settle?.cancel()
-      settle = $.clock.after(isOk ? DONE_MS : OOPS_MS, () => void setMood($, 'sleep'))
+      settle = $.clock.after(isOk ? DONE_MS : OOPS_MS, () => void setMood($, 'sleep').catch(() => undefined))
+    } else {
+      const id = e.agentId
+      const isOk = e.reason === 'answer' && !e.isAborted
+      settling(calls, id)
+      await track($, held =>
+        held.workers.some(one => one.id === id && one.endedAt === 0) ? setWorker(held, id, at, { doing: isOk ? 'done' : 'stopped', endedAt: at }) : held,
+      )
     }
 
     return next(e)

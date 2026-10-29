@@ -1,11 +1,12 @@
 import type { RenderElement } from 'claude-code'
 
-import type { Diff, GitFile, GitSection, Repo } from '../../types'
+import type { Branches, Diff, GitFile, GitSection, Repo, Touched } from '../../types'
 import { COMMIT_PROMPT, isChanged, isStaged, letterOf } from '../git'
 import { statusHue } from '../icons'
 import type { Hue, IconName } from '../icons'
-import { base, dir } from '../paths'
-import { G, fit, fitStart, inView, plural } from './chrome'
+import { base, dir, join, short } from '../paths'
+import { findTouched } from '../touched'
+import { G, ago, fit, fitStart, inView, plural } from './chrome'
 import { browser, fileView } from './files'
 import { pullsList, runView, runsList } from './github'
 import { commitView, historyList } from './history'
@@ -77,12 +78,16 @@ function board(kit: Kit, m: Model, act: Actions): RenderElement {
   )
 }
 
+/** What Claude wrote of a repository's changed files. */
+const byClaude = (m: Model, repo: Repo, file: GitFile): Touched | undefined => findTouched(m.touched, join(repo.root, file.path))
+
 function fileRow(kit: Kit, m: Model, repo: Repo, file: GitFile, staged: boolean, act: Actions): RenderElement {
   const { Text } = kit
   const letter = letterOf(file, staged)
   const folder = dir(file.path)
   const side = staged ? 's' : 'w'
   const name = base(file.path)
+  const claude = byClaude(m, repo, file)
 
   return row(kit, m, {
     key: `${side}:${repo.root}:${file.path}`,
@@ -91,10 +96,11 @@ function fileRow(kit: Kit, m: Model, repo: Repo, file: GitFile, staged: boolean,
         {letter}
       </Text>
     ),
-    title: fit(name, Math.max(12, m.width - 20)),
-    sub: folder === '' ? false : fitStart(folder, Math.max(8, m.width - name.length - 16)),
+    title: fit(name, Math.max(12, m.width - 24)),
+    sub: folder === '' ? false : fitStart(folder, Math.max(8, m.width - name.length - 20)),
     inline: true,
     trail: [
+      claude !== undefined && icon(kit, m, 'sparkle', claude.isAsLeft ? 'purple' : 'gray', 12),
       press(kit, `at:${side}:${file.path}`, '@', () => act.mention(`${repo.root}/${file.path}`)),
       staged
         ? press(kit, `mv:${side}:${file.path}`, '−', () => act.stage(repo.root, [file.path], false), tone(m, 'orange'))
@@ -131,7 +137,9 @@ function branchCard(kit: Kit, m: Model, repo: Repo, act: Actions): RenderElement
       <Box flexDirection="row" alignItems="center" columnGap={1}>
         {m.repos.length > 1 && press(kit, 'repo-back', G.back, () => act.closeRepo())}
         {icon(kit, m, 'branch', 'blue', 13)}
-        <Text bold>{fit(repo.branch, 30)}</Text>
+        <kit.Button key="branch-menu" plain onPress={() => act.toggleMenu('branches')}>
+          <Text bold>{`${fit(repo.branch, 30)} ${m.menu === 'branches' ? G.down : '⌄'}`}</Text>
+        </kit.Button>
         <Box flexGrow={1} />
         {repo.upstream !== '' && <Text dimColor>{fit(repo.upstream, 28)}</Text>}
       </Box>,
@@ -161,14 +169,115 @@ function branchCard(kit: Kit, m: Model, repo: Repo, act: Actions): RenderElement
   )
 }
 
+/** The branches to switch to, latest first, a field for a new one, and the repository's other worktrees. */
+function branchMenu(kit: Kit, m: Model, repo: Repo, act: Actions): RenderElement {
+  const { Box, Text, Input } = kit
+  const held: Branches | null = m.branches !== null && m.branches.root === repo.root ? m.branches : null
+  const isBusy = m.busy !== ''
+  const others = held?.worktrees.filter(one => !one.isCurrent) ?? []
+  const dirty = repo.files.filter(one => one.index !== '?').length
+
+  return (
+    <Box flexDirection="column">
+      {section(kit, m, 'Switch branch', held === null ? undefined : held.items.length, press(kit, 'branch-menu-close', 'close', () => act.toggleMenu('branches')))}
+      {card(
+        kit,
+        m,
+        [
+          Input !== undefined && (
+            <Box paddingY={m.isGrid ? 0 : 0.25}>
+              <Input key={`new-branch-${repo.root}`} placeholder={`New branch from ${fit(repo.branch, 24)}`} submitLabel="create" onSubmit={text => act.createBranch(repo.root, text)} />
+            </Box>
+          ),
+          dirty > 0 && <Text dimColor wrap="wrap">{`${dirty} uncommitted change${dirty === 1 ? '' : 's'} come along, unless they clash with the branch: then git says so and nothing moves.`}</Text>,
+          held === null && <Text dimColor>Reading the branches…</Text>,
+          ...(held?.items ?? []).slice(0, 30).map(one => {
+            const track = [one.ahead > 0 ? `${G.up}${one.ahead}` : '', one.behind > 0 ? `${G.down}${one.behind}` : ''].filter(Boolean).join(' ')
+            const sub = [one.when, track, one.isRemote ? 'remote' : ''].filter(part => part !== '').join(` ${G.dot} `)
+
+            return row(kit, m, {
+              key: `branch:${one.isRemote ? 'r' : 'l'}:${one.name}`,
+              lead: icon(kit, m, one.isCurrent ? 'check' : one.isRemote ? 'globe' : 'branch', one.isCurrent ? 'green' : one.isRemote ? 'gray' : 'blue', 13),
+              title: fit(one.name, Math.max(12, m.width - 26)),
+              isBold: one.isCurrent,
+              sub,
+              inline: true,
+              ...(one.isCurrent || isBusy ? {} : { onPress: () => act.switchBranch(repo.root, one.name, one.isRemote) }),
+            })
+          }),
+          held !== null && held.items.length > 30 && <Text dimColor>{`+${held.items.length - 30} older`}</Text>,
+        ],
+        { dense: true },
+      )}
+      {others.length > 0 && section(kit, m, 'Worktrees', others.length)}
+      {others.length > 0 &&
+        card(
+          kit,
+          m,
+          others.map(one =>
+            row(kit, m, {
+              key: `worktree:${one.path}`,
+              lead: icon(kit, m, 'folder', 'teal', 13),
+              title: one.branch === '' ? base(one.path) : one.branch,
+              sub: short(one.path, m.home, Math.max(16, m.width - 30)),
+              inline: true,
+              trail: [press(kit, `worktree-term:${one.path}`, 'terminal', () => act.openWorktree(one.path), tone(m, 'blue'))],
+            }),
+          ),
+          { dense: true },
+        )}
+    </Box>
+  )
+}
+
+/** Claude's share of the changes: how many, the way to see only those, and the way to put them all back. */
+function claudeStrip(kit: Kit, m: Model, repo: Repo, act: Actions): RenderElement | false {
+  const { Box, Text } = kit
+  const mine = repo.files.map(file => byClaude(m, repo, file)).filter((one): one is Touched => one !== undefined)
+  if (mine.length === 0) return false
+  const undoable = mine.filter(one => one.canUndo)
+  const isAsking = m.confirming === `undo-all:${repo.root}`
+  const edited = undoable.filter(one => !one.isAsLeft).length
+
+  return card(
+    kit,
+    m,
+    [
+      <Box flexDirection="row" alignItems="center" columnGap={1}>
+        {icon(kit, m, 'sparkle', 'purple', 13)}
+        <Text color={tone(m, 'purple')}>{`Claude changed ${mine.length} of these`}</Text>
+        <Box flexGrow={1} />
+        {press(kit, 'claude-only', m.claudeOnly ? 'show all' : "only Claude's", () => act.setClaudeOnly(!m.claudeOnly), tone(m, 'blue'))}
+        {undoable.length > 0 && !isAsking && press(kit, 'claude-undo-all', 'undo all', () => act.ask(`undo-all:${repo.root}`), tone(m, 'red'))}
+      </Box>,
+      isAsking && (
+        <Box flexDirection="row" alignItems="center" columnGap={1} flexWrap="wrap">
+          {icon(kit, m, 'warning', 'red', 13)}
+          <Text color={tone(m, 'red')} wrap="wrap">
+            {`Put ${undoable.length} file${undoable.length === 1 ? '' : 's'} back as before Claude's first edit?${edited > 0 ? ` ${edited} also changed since; that goes too.` : ''}`}
+          </Text>
+          <kit.Button key="claude-undo-all-yes" variant="primary" label="Undo" onPress={() => act.undoClaude(undoable.map(one => one.path))} />
+          <kit.Button key="claude-undo-all-no" plain dimColor label="Cancel" onPress={() => act.cancel()} />
+        </Box>
+      ),
+    ],
+    { dense: true },
+  )
+}
+
 function repoView(kit: Kit, m: Model, repo: Repo, act: Actions): RenderElement {
   const { Box, Text, Input } = kit
-  const staged = repo.files.filter(isStaged)
-  const changed = repo.files.filter(isChanged)
+  // With nothing of Claude's left in the changes, the filter has nothing to keep: everything shows.
+  const isOnly = m.claudeOnly && repo.files.some(file => byClaude(m, repo, file) !== undefined)
+  const isShown = (file: GitFile): boolean => !isOnly || byClaude(m, repo, file) !== undefined
+  const staged = repo.files.filter(isStaged).filter(isShown)
+  const changed = repo.files.filter(isChanged).filter(isShown)
 
   return (
     <Box flexDirection="column">
       {branchCard(kit, m, repo, act)}
+      {m.menu === 'branches' && branchMenu(kit, m, repo, act)}
+      {claudeStrip(kit, m, repo, act)}
       {repo.files.length === 0 && emptyState(kit, m, 'checkCircle', 'green', 'Working tree clean', 'Nothing to commit.')}
       {staged.length > 0 && section(kit, m, 'Staged', staged.length, press(kit, 'unstage-all', '− unstage all', () => act.stage(repo.root, 'all', false)))}
       {staged.length > 0 && card(kit, m, staged.slice(0, 200).map(file => fileRow(kit, m, repo, file, true, act)), { dense: true })}
@@ -199,10 +308,45 @@ function repoView(kit: Kit, m: Model, repo: Repo, act: Actions): RenderElement {
   )
 }
 
+/** Under a diff of a file Claude wrote: how often, whether it is as Claude left it, and the way back. */
+function claudeNote(kit: Kit, m: Model, claude: Touched, act: Actions): RenderElement {
+  const { Box, Text } = kit
+  const isAsking = m.confirming === `undo:${claude.path}`
+  const says = [
+    `Claude ${claude.isNew ? 'made this file' : `edited this ${claude.edits === 1 ? 'once' : `${claude.edits} times`}`} ${ago(m.now, claude.at)}`,
+    claude.isAsLeft ? '' : 'changed since',
+  ].filter(Boolean)
+
+  return (
+    <Box flexDirection="column" rowGap={0.25}>
+      <Box flexDirection="row" alignItems="center" columnGap={1}>
+        {icon(kit, m, 'sparkle', 'purple', 13)}
+        <Text color={tone(m, 'purple')}>{says.join(` ${G.dot} `)}</Text>
+        <Box flexGrow={1} />
+        {claude.canUndo && !isAsking && press(kit, 'diff-undo-claude', claude.isNew ? 'delete it' : "undo Claude's edits", () => act.ask(`undo:${claude.path}`), tone(m, 'red'))}
+        {!claude.canUndo && <Text dimColor>too large to undo here</Text>}
+      </Box>
+      {isAsking && (
+        <Box flexDirection="row" alignItems="center" columnGap={1} flexWrap="wrap">
+          {icon(kit, m, 'warning', 'red', 13)}
+          <Text color={tone(m, 'red')} wrap="wrap">
+            {claude.isNew
+              ? `Delete ${base(claude.path)}? Claude made it this session.`
+              : `Put ${base(claude.path)} back as it was before Claude's first edit?${claude.isAsLeft ? '' : ' Changes made since go too.'}`}
+          </Text>
+          <kit.Button key="diff-undo-claude-yes" variant="primary" label={claude.isNew ? 'Delete' : 'Undo'} onPress={() => act.undoClaude([claude.path])} />
+          <kit.Button key="diff-undo-claude-no" plain dimColor label="Cancel" onPress={() => act.cancel()} />
+        </Box>
+      )}
+    </Box>
+  )
+}
+
 function diffView(kit: Kit, m: Model, diff: Diff, act: Actions): RenderElement {
   const { Box, Text, Code } = kit
   const file = m.repos.find(one => one.root === diff.root)?.files.find(one => one.path === diff.path)
   const letter = file === undefined ? 'M' : letterOf(file, diff.isStaged)
+  const claude = findTouched(m.touched, join(diff.root, diff.path))
 
   return (
     <Box flexDirection="column">
@@ -223,6 +367,7 @@ function diffView(kit: Kit, m: Model, diff: Diff, act: Actions): RenderElement {
               : action(kit, m, 'diff-move', 'plus', 'Stage', () => act.stage(diff.root, [diff.path], true), 'green')),
           action(kit, m, 'diff-at', 'at', 'Mention', () => act.mention(`${diff.root}/${diff.path}`), 'gray'),
         ]),
+        claude !== undefined && claudeNote(kit, m, claude, act),
       ])}
       <Box flexDirection="column" marginTop={0.5}>
         {diff.isBinary && card(kit, m, [<Text dimColor>A binary file: no text to compare.</Text>])}

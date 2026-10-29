@@ -3,13 +3,14 @@ import type { RenderElement } from 'claude-code'
 import type { Tab } from '../../types'
 import type { IconName } from '../icons'
 import { base } from '../paths'
+import { activityCard } from './activity'
 import { G, NARROW, fit, rule } from './chrome'
 import { fileView } from './files'
 import { gitTab } from './git'
 import type { Actions, Kit, Model } from './model'
 import { portsTab } from './ports'
 import { termTab } from './terminals'
-import { browserTabs, icon, mascot, moodPill, pill, segments, tabPage, tone } from './ui'
+import { browserTabs, icon, mascot, pill, segments, tabPage, tone } from './ui'
 
 export const TABS: readonly { id: Tab; label: string; hotkey: string; icon: IconName }[] = [
   { id: 'git', label: 'Git', hotkey: '1', icon: 'branch' },
@@ -35,7 +36,7 @@ export function pane(kit: Kit, m: Model, act: Actions): RenderElement {
   if (m.isGrid) {
     return (
       <Box {...frame}>
-        {header(kit, m)}
+        {header(kit, m, act)}
         <Box marginTop={1}>{tabs(kit, m, act)}</Box>
         {rule(kit, m)}
         {body}
@@ -48,7 +49,7 @@ export function pane(kit: Kit, m: Model, act: Actions): RenderElement {
   // As a browser: the tabs, and under them the open tab's page, one sheet with it.
   return (
     <Box {...frame}>
-      {header(kit, m)}
+      {header(kit, m, act)}
       <Box flexDirection="column" marginTop={1}>
         {tabs(kit, m, act)}
         {tabPage(kit, m, body)}
@@ -65,31 +66,58 @@ function place(m: Model): { name: string; branch: string; ahead: number; behind:
   return { name: repo.name, branch: repo.branch, ahead: repo.ahead, behind: repo.behind }
 }
 
-/** The app's name with its icon, where it is, and what is live, as a window's title area. */
-export function header(kit: Kit, m: Model): RenderElement {
+/** Cells a pane needs for the turn card to sit beside the full-size mascot; a narrower one stacks them. */
+const SIDE_BY_SIDE = 66
+
+/**
+ * The app's name with its icon, where it is and what is live, as a window's
+ * title area; beside the mascot, the card of what the latest turn went on.
+ * In a narrow pane the card goes under a smaller mascot, the whole width
+ * its own.
+ */
+export function header(kit: Kit, m: Model, act: Actions): RenderElement {
   const { Box, Text } = kit
   const at = place(m)
-  const room = Math.max(8, m.width - 40)
+  const isBeside = m.isGrid || m.width >= SIDE_BY_SIDE
+  const room = Math.max(8, isBeside ? m.width - 52 : m.width - 30)
+  const title = (
+    <Box flexDirection="row" flexWrap="wrap" alignItems="center" columnGap={1} rowGap={0.3}>
+      <Text bold>Workbench</Text>
+      {at.name !== '' && m.width >= NARROW && <Text dimColor>{fit(at.name, Math.max(12, room - at.branch.length))}</Text>}
+      {at.branch !== '' && icon(kit, m, 'branch', 'gray', 12)}
+      {at.branch !== '' && (
+        <kit.Button key="header-branch" plain onPress={() => act.showBranches()}>
+          <Text color={tone(m, 'blue')}>{fit(at.branch, Math.floor(room / 2))}</Text>
+        </kit.Button>
+      )}
+      {at.ahead > 0 && <Text color={tone(m, 'orange')}>{`${G.up}${at.ahead}`}</Text>}
+      {at.behind > 0 && <Text color={tone(m, 'orange')}>{`${G.down}${at.behind}`}</Text>}
+      <Box flexGrow={1} />
+      {m.counts.running > 0 && pill(kit, m, `${m.counts.running} running`, 'green', true)}
+      {m.counts.ports > 0 && pill(kit, m, `${m.counts.ports} port${m.counts.ports === 1 ? '' : 's'}`, 'blue', true)}
+    </Box>
+  )
+  if (!isBeside) {
+    return (
+      <Box flexDirection="column">
+        <Box flexDirection="row" alignItems="center" columnGap={1}>
+          {mascot(kit, m, m.mood, 72)}
+          <Box flexDirection="column" flexGrow={1} flexShrink={1} minWidth={0}>
+            {title}
+          </Box>
+        </Box>
+        {activityCard(kit, m, act)}
+      </Box>
+    )
+  }
 
   return (
     <Box flexDirection="row" alignItems="center" columnGap={1}>
       {mascot(kit, m, m.mood, 128)}
-      <Box flexDirection="column" flexShrink={1} minWidth={0}>
-        <Text bold>Workbench</Text>
-        <Box flexDirection="row" alignItems="center" columnGap={1}>
-          {at.name !== '' && m.width >= NARROW && <Text dimColor>{fit(at.name, Math.max(12, room - at.branch.length))}</Text>}
-          {at.branch !== '' && icon(kit, m, 'branch', 'gray', 12)}
-          {at.branch !== '' && <Text color={tone(m, 'blue')}>{fit(at.branch, Math.floor(room / 2))}</Text>}
-          {at.ahead > 0 && <Text color={tone(m, 'orange')}>{`${G.up}${at.ahead}`}</Text>}
-          {at.behind > 0 && <Text color={tone(m, 'orange')}>{`${G.down}${at.behind}`}</Text>}
-        </Box>
-        <Box flexDirection="row" marginTop={0.5}>
-          {moodPill(kit, m, m.mood)}
-        </Box>
+      <Box flexDirection="column" flexGrow={1} flexShrink={1} minWidth={0}>
+        {title}
+        {activityCard(kit, m, act)}
       </Box>
-      <Box flexGrow={1} />
-      {m.counts.running > 0 && pill(kit, m, `${m.counts.running} running`, 'green', true)}
-      {m.counts.ports > 0 && pill(kit, m, `${m.counts.ports} port${m.counts.ports === 1 ? '' : 's'}`, 'blue', true)}
     </Box>
   )
 }

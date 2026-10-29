@@ -372,3 +372,22 @@ describe('pane', () => {
     }
   })
 })
+
+describe('scripts menu', () => {
+  test('the project scripts show with no terminal open, and drop down from the tab strip', async ($, on) => {
+    const seen = world(on, false)
+    for (const surface of SURFACES) {
+      const ui = await $.ui.mount({ ...PANE, surface })
+      for (let turn = 0; turn < 5; turn += 1) await seen.settle()
+      await ui.press({ key: 'tab-term' })
+      expect(await hasKey(ui, 'empty-script-')).toBe(true)
+      await ui.press({ key: 'term-scripts' })
+      const listed = (await ui.findAll({ type: 'Button' })).map(one => one.key ?? '').filter(key => key.startsWith('menu-script-'))
+      expect(listed).toEqual(['menu-script-|npm|dev', 'menu-script-|npm|test'])
+      await ui.press({ key: 'term-scripts-close' })
+      expect(await hasKey(ui, 'menu-script-')).toBe(false)
+      await ui.press({ key: 'tab-git' })
+      await ui.unmount()
+    }
+  })
+})

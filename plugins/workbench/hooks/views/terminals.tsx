@@ -1,6 +1,6 @@
 import type { RenderElement } from 'claude-code'
 
-import type { Term } from '../../types'
+import type { Script, Term } from '../../types'
 import { native, short } from '../paths'
 import { TERM, promptText, screenRows, screenSvg, screenTail } from '../screen'
 import type { Row } from '../screen'
@@ -18,8 +18,9 @@ export function termTab(kit: Kit, m: Model, act: Actions): RenderElement {
 }
 
 /** The window with no session in it: what a terminal is here, and the way to open one. */
-function emptyScreen(kit: Kit, act: Actions): RenderElement {
+function emptyScreen(kit: Kit, m: Model, act: Actions): RenderElement {
   const { Box, Button, Text } = kit
+  const quick = m.scripts.slice(0, 6)
 
   return (
     <Box flexDirection="column" rowGap={0.5} paddingY={0.5}>
@@ -34,6 +35,12 @@ function emptyScreen(kit: Kit, act: Actions): RenderElement {
           <Text color={TERM.blue}>+ New PowerShell</Text>
         </Button>
       </Box>
+      {quick.length > 0 && (
+        <Box flexDirection="column" rowGap={0.25} marginTop={0.5}>
+          <Text color={TERM.dim}>Or run one of this project's scripts:</Text>
+          {quick.map(script => scriptRow(kit, m, script, act, 'empty'))}
+        </Box>
+      )}
       <Text color={TERM.dim} wrap="wrap">
         Programs that wait for typed answers (Read-Host, password prompts, vim, ssh) cannot run in a pane terminal.
       </Text>
@@ -55,7 +62,8 @@ function terminalWindow(kit: Kit, m: Model, term: Term | undefined, act: Actions
   return (
     <Box flexDirection="column" marginTop={0.5} backgroundColor={TERM.background} borderStyle="round" borderColor={TERM.edge}>
       {tabStrip(kit, m, term, act)}
-      {term === undefined ? <Box paddingX={1}>{emptyScreen(kit, act)}</Box> : session(kit, m, term, act)}
+      {m.menu === 'scripts' && scriptsMenu(kit, m, act)}
+      {term === undefined ? <Box paddingX={1}>{emptyScreen(kit, m, act)}</Box> : session(kit, m, term, act)}
     </Box>
   )
 }
@@ -177,6 +185,13 @@ function tabStrip(kit: Kit, m: Model, active: Term | undefined, act: Actions): R
           <Text color={TERM.foreground}>+</Text>
         </Button>
       </Box>
+      {m.scripts.length > 0 && (
+        <Box paddingRight={0.75}>
+          <Button key="term-scripts" plain onPress={() => act.toggleMenu('scripts')}>
+            <Text color={m.menu === 'scripts' ? TERM.white : TERM.dim}>{m.menu === 'scripts' ? '▴ scripts' : '▾ scripts'}</Text>
+          </Button>
+        </Box>
+      )}
       <Box flexGrow={1} />
       {active !== undefined && sessionControls(kit, m, active, act)}
     </Box>
@@ -194,6 +209,63 @@ function sessionControls(kit: Kit, m: Model, active: Term, act: Actions): Render
       {last !== undefined && last.lines.length > 0 && control(kit, `copy-${last.id}`, 'Copy', TERM.foreground, press => act.copyBlock(last.id, press))}
       {active.state !== 'ended' && control(kit, `clear-${active.id}`, 'Clear', TERM.foreground, () => act.clearTerm(active.id))}
       {control(kit, `restart-${active.id}`, 'Restart', active.state === 'ended' ? TERM.blue : TERM.foreground, () => act.restartTerm(active.id))}
+    </Box>
+  )
+}
+
+/** The terminal running a script now, if one is. */
+const runnerOf = (m: Model, script: Script): Term | undefined => m.terms.find(term => term.script === script.id && term.state !== 'ended')
+
+/** One script: a press that runs it in its own tab, or shows the tab it already runs in. */
+function scriptRow(kit: Kit, m: Model, script: Script, act: Actions, prefix: string): RenderElement {
+  const { Box, Button, Text } = kit
+  const term = runnerOf(m, script)
+  const isRunning = term?.state === 'busy'
+
+  return (
+    <Box flexDirection="row" alignItems="center" columnGap={1}>
+      <Text color={isRunning ? TERM.green : TERM.dim}>{isRunning ? '●' : '▶'}</Text>
+      <Button key={`${prefix}-script-${script.id}`} plain onPress={() => act.runScript(script)}>
+        <Text color={isRunning ? TERM.green : TERM.white} bold={!isRunning}>
+          {fit(script.label, 22)}
+        </Text>
+      </Button>
+      <Box flexShrink={1} minWidth={0}>
+        <Text color={TERM.dim} wrap="truncate-end">
+          {isRunning && term !== undefined ? `running in ${term.title}` : script.cmd}
+        </Text>
+      </Box>
+    </Box>
+  )
+}
+
+/** The project's scripts, by the folder that declares them, under the tab strip as Windows Terminal's drop-down is. */
+function scriptsMenu(kit: Kit, m: Model, act: Actions): RenderElement {
+  const { Box, Button, Text } = kit
+  const folders = [...new Set(m.scripts.map(script => script.folder))]
+  const shown = m.scripts.slice(0, 40)
+
+  return (
+    <Box flexDirection="column" backgroundColor={TERM.chrome} paddingX={1.5} paddingY={0.5} rowGap={0.25}>
+      <Box flexDirection="row" alignItems="center">
+        <Text color={TERM.dim}>{`${plural(m.scripts.length, 'script')} in this project`}</Text>
+        <Box flexGrow={1} />
+        <Button key="term-scripts-close" plain onPress={() => act.toggleMenu('scripts')}>
+          <Text color={TERM.dim}>×</Text>
+        </Button>
+      </Box>
+      {folders.map(folder => {
+        const mine = shown.filter(script => script.folder === folder)
+        if (mine.length === 0) return false
+
+        return (
+          <Box flexDirection="column" rowGap={0.25} marginTop={folders.length > 1 ? 0.25 : 0}>
+            {folders.length > 1 && <Text color={TERM.cyan}>{folder === '' ? '(root)' : folder}</Text>}
+            {mine.map(script => scriptRow(kit, m, script, act, 'menu'))}
+          </Box>
+        )
+      })}
+      {m.scripts.length > shown.length && <Text color={TERM.dim}>{`+${m.scripts.length - shown.length} more: /workbench run <name>`}</Text>}
     </Box>
   )
 }

@@ -77,6 +77,20 @@ export type Pull = {
   checks: Checks
 }
 export type PullList = { root: string; items: Pull[]; note: string }
+
+/** A branch as the switcher lists it; a remote one has no local branch of its name yet. */
+export type BranchInfo = {
+  name: string
+  upstream: string
+  ahead: number
+  behind: number
+  /** When its tip was committed, as git says it (`3 days ago`). */
+  when: string
+  isCurrent: boolean
+  isRemote: boolean
+}
+export type Worktree = { path: string; branch: string; isCurrent: boolean }
+export type Branches = { root: string; items: BranchInfo[]; worktrees: Worktree[] }
 export type BranchPull = { root: string; branch: string; pull: Pull | null }
 
 export type Run = {
@@ -92,6 +106,23 @@ export type Run = {
 export type Job = { name: string; status: string; conclusion: string; url: string; failed: string[] }
 export type Runs = { root: string; branch: string; items: Run[]; note: string }
 export type OpenRun = { id: number; jobs: Job[] }
+
+// ── what Claude touched ────────────────────────────────────────────────────
+
+/** A file Claude wrote this session, with Edit, Write or NotebookEdit. */
+export type Touched = {
+  /** Absolute, as `paths.norm` spells it. */
+  path: string
+  edits: number
+  /** When Claude last wrote it. */
+  at: number
+  /** The file did not exist before Claude wrote it. */
+  isNew: boolean
+  /** The file is as Claude left it: nobody has written it since. */
+  isAsLeft: boolean
+  /** The file as it was before Claude's first edit can be put back. */
+  canUndo: boolean
+}
 
 // ── terminals ───────────────────────────────────────────────────────────────
 
@@ -169,6 +200,19 @@ export type PortRow = {
 
 export type Ports = { rows: PortRow[]; at: number; note: string }
 
+/** A dev server that stopped listening, kept a while so it can be started again. */
+export type GonePort = {
+  key: string
+  port: number
+  name: string
+  framework: string
+  /** The terminal it ran in, and the command that started it; `''` when unknown. */
+  termId: string
+  cmd: string
+  cwd: string
+  at: number
+}
+
 /**
  * What the mascot is doing, after what Claude is doing: asleep when idle, thinking between
  * steps, reading, at work on files, running a command, on the web, with helpers (subagents),
@@ -177,6 +221,59 @@ export type Ports = { rows: PortRow[]; at: number; note: string }
 export type Mood = 'sleep' | 'think' | 'read' | 'work' | 'run' | 'web' | 'helpers' | 'compact' | 'wait' | 'done' | 'oops'
 
 export type Counts ={ changed: number; running: number; ports: number }
+
+// ── what a turn went on ─────────────────────────────────────────────────────
+
+/**
+ * What a stretch of a turn went on: a kind of tool at work, the person being
+ * asked, the model writing (its reply, code, a call's arguments) or thinking.
+ */
+export type Spend = 'search' | 'read' | 'run' | 'write' | 'agents' | 'other' | 'wait' | 'think'
+
+/** What a model loop is doing, as its row in the card says: a kind of work, or done or stopped. */
+export type Phase = Spend | 'done' | 'stopped'
+
+/** A model loop at work in the turn: the main one (`id` `''`) or a subagent. */
+export type Worker = {
+  id: string
+  /** The model as the engine names it (`claude-opus-5-5`); `''` before its first request. */
+  model: string
+  /** The effort its requests ask for (`high`); `''` for a model without one. */
+  effort: string
+  /** A subagent's type and its task in a few words; `''` for the main loop. */
+  type: string
+  task: string
+  /** A subagent's: what it is doing now, or did last. The main loop's row reads the turn's own `now`. */
+  doing: Phase
+  /** When it began doing that. */
+  since: number
+  startedAt: number
+  /** 0 while it works. */
+  endedAt: number
+}
+
+/** Something Claude looked at in the turn, or a file it wrote. */
+export type Source = { kind: 'file' | 'search' | 'web' | 'edit'; label: string }
+
+/** The latest turn: how long it took, what the time went on, who worked on it and what they looked at. */
+export type Activity = {
+  turnId: string
+  startedAt: number
+  /** 0 while the turn runs. */
+  endedAt: number
+  outcome: 'running' | 'done' | 'stopped'
+  /** Tool calls made, the subagents' included. */
+  steps: number
+  /** Milliseconds charged to each kind of work, up to `at`; the time since goes to `now`, which began at `since`. */
+  spent: Record<Spend, number>
+  at: number
+  now: Spend
+  since: number
+  /** The main loop first, then each subagent in the order they started. */
+  workers: Worker[]
+  /** The latest first, each once. */
+  sources: Source[]
+}
 
 declare module 'claude-code' {
   interface PluginState {
@@ -187,6 +284,10 @@ declare module 'claude-code' {
       scheme: 'light' | 'dark'
       /** What the mascot in the header is doing, after what Claude is doing. */
       mood: Mood
+      /** The latest turn, as the card beside the mascot shows it; `null` before the first. */
+      activity: Activity | null
+      /** The card lists the turn's sources. */
+      activityOpen: boolean
       workspace: string
       counts: Counts
       repos: Repo[]
@@ -212,7 +313,17 @@ declare module 'claude-code' {
       /** A line the pane asks the input to hold (a command to edit again), by `seq`. */
       inputFill: { seq: number; text: string } | null
       scripts: Script[]
+      /** The drop-down open in the pane (`scripts`, `branches`); `''` for none. */
+      menu: string
+      /** Files Claude wrote this session, the latest first. */
+      touched: Touched[]
+      /** Each touched file's text before Claude's first edit (`null`: it did not exist), a hash of how Claude left it, and its time then. */
+      originals: Record<string, { text: string | null; left: string; mtimeMs: number }>
+      /** Changes shows only the files Claude touched. */
+      claudeOnly: boolean
+      branches: Branches | null
       ports: Ports
+      gone: GonePort[]
       portFilter: 'dev' | 'all'
       portOpen: string
       /** The press waiting on its second one; `''` for none. */

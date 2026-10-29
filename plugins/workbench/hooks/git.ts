@@ -1,4 +1,4 @@
-import type { Checks, CommitFile, GitFile, Job, LogRow, Pull, Run } from '../types'
+import type { BranchInfo, Checks, CommitFile, GitFile, Job, LogRow, Pull, Run, Worktree } from '../types'
 
 // git's and gh's output, read. The hooks module runs the commands; nothing
 // here touches the engine, so all of it can be tested on fixtures.
@@ -250,6 +250,67 @@ export function parseNameStatus(out: string): CommitFile[] {
 }
 
 /** Only shas git itself printed go back to git. */
+// ── branches ────────────────────────────────────────────────────────────────
+
+/** Local and remote branches, the latest committed first; a tab between fields (git allows none in a ref name). */
+export const BRANCH_ARGS = [
+  'for-each-ref',
+  '--sort=-committerdate',
+  '--format=%(refname)%09%(upstream:short)%09%(upstream:track,nobracket)%09%(committerdate:relative)%09%(HEAD)',
+  'refs/heads',
+  'refs/remotes',
+]
+
+/** `BRANCH_ARGS`' output: each local branch, then each remote one that has no local branch of its name. */
+export function parseBranches(out: string): BranchInfo[] {
+  const local: BranchInfo[] = []
+  const remote: BranchInfo[] = []
+  for (const line of out.split(/\r?\n/)) {
+    const [ref = '', upstream = '', track = '', when = '', head = ''] = line.split('\t')
+    if (ref.startsWith('refs/heads/')) {
+      local.push({
+        name: ref.slice('refs/heads/'.length),
+        upstream,
+        ahead: Number(/ahead (\d+)/.exec(track)?.[1] ?? 0),
+        behind: Number(/behind (\d+)/.exec(track)?.[1] ?? 0),
+        when,
+        isCurrent: head.trim() === '*',
+        isRemote: false,
+      })
+    } else if (ref.startsWith('refs/remotes/') && !ref.endsWith('/HEAD')) {
+      remote.push({ name: ref.slice('refs/remotes/'.length), upstream: '', ahead: 0, behind: 0, when, isCurrent: false, isRemote: true })
+    }
+  }
+  const tracked = new Set(local.map(one => one.upstream).filter(name => name !== ''))
+  const named = new Set(local.map(one => one.name))
+  const untracked = remote.filter(one => !tracked.has(one.name) && !named.has(one.name.slice(one.name.indexOf('/') + 1)))
+
+  return [...local, ...untracked]
+}
+
+/** `git worktree list --porcelain`: each worktree's folder and the branch checked out there. */
+export function parseWorktrees(out: string, current: string): Worktree[] {
+  const found: Worktree[] = []
+  for (const stanza of out.split(/\r?\n\r?\n/)) {
+    const raw = /^worktree (.+)$/m.exec(stanza)?.[1]?.trim()
+    if (raw === undefined || /^bare$/m.test(stanza)) continue
+    const path = raw.replace(/\\/g, '/')
+    const branch = /^branch refs\/heads\/(.+)$/m.exec(stanza)?.[1]?.trim() ?? (/^detached$/m.test(stanza) ? '(detached)' : '')
+    found.push({ path, branch, isCurrent: path.toLowerCase() === current.toLowerCase() })
+  }
+
+  return found
+}
+
+/** What `git switch` takes to check a listed branch out: a remote one becomes a local branch tracking it. */
+export function switchArgs(branch: Pick<BranchInfo, 'name' | 'isRemote'>): string[] {
+  return branch.isRemote ? ['switch', '--track', branch.name] : ['switch', branch.name]
+}
+
+/** Whether git takes `name` as a new branch's name (`git check-ref-format --branch`, roughly). */
+export const isBranchName = (name: string): boolean =>
+  name !== '' && name !== '@' && !/[\s~^:?*[\\\x00-\x1f\x7f]|\.\.|@\{|\/\/|^[-/.]|[/.]$|\.lock$|\/\./.test(name)
+
 export const isSha = (text: string): boolean => /^[0-9a-f]{4,40}$/.test(text)
 
 /** The last few lines of a command's complaint: enough to say what went wrong in a toast. */

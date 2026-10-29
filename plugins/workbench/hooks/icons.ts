@@ -559,6 +559,22 @@ export function pillSvg(text: string, color: string, withDot = false): string {
   ].join('')
 }
 
+/** A small rounded square of one colour: a legend's key. */
+export function swatchSvg(color: string, size = 10): string {
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}" viewBox="0 0 10 10"><rect width="10" height="10" rx="2.6" fill="${color}"/></svg>`
+}
+
+/** The size a stack of `count` dots is drawn at. */
+export const stackSize = (count: number): { width: number; height: number } => ({ width: 16 + Math.max(0, count - 1) * 10, height: 16 })
+
+/** Dots overlapping as avatars do, the first on top, each ringed in the colour of what it sits on. */
+export function stackSvg(colors: readonly string[], ring: string): string {
+  const { width, height } = stackSize(colors.length)
+  const dots = colors.map((color, at) => `<circle cx="${8 + at * 10}" cy="8" r="7" fill="${color}" stroke="${ring}" stroke-width="1.6"/>`)
+
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">${dots.reverse().join('')}</svg>`
+}
+
 /** Recent values as a smooth line with a soft fill under it. */
 export function sparklineSvg(values: readonly number[], color: string, width = 160, height = 26): string {
   const max = Math.max(...values, 1)
